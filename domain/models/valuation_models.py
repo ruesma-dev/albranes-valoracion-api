@@ -112,6 +112,18 @@ class LineValuation(StrictSchemaModel):
         ),
     )
 
+    cantidad_override: Optional[float] = Field(
+        default=None,
+        description=(
+            "Solo para sintéticas de tipo TIEMPO (modifier_source="
+            "'tiempo_exceso'). Minutos de exceso calculados por el LLM "
+            "a partir de contexto_linea.notas_tiempo. Puede ser 0. "
+            "Null para todas las demás sintéticas (heredan cantidad "
+            "del parent) y para líneas 'from_albaran' (tienen cantidad "
+            "propia en el albarán)."
+        ),
+    )
+
     rol_linea: Optional[str] = Field(
         default=None,
         description=(
