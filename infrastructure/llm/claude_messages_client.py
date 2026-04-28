@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from domain.models.llm_attachment import LlmAttachment
 from domain.ports.llm_client import LlmVisionClient
+from infrastructure.llm.llm_call_logger import LlmCallLogger
 from infrastructure.llm.retry_policy import RetryPolicy, run_with_retry
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,7 @@ class ClaudeMessagesVisionClient(LlmVisionClient):
         max_tokens: int = 8192,
         timeout_s: int = 180,
         retry_policy: RetryPolicy | None = None,
+        call_logger: LlmCallLogger | None = None,
     ) -> None:
         self._client = anthropic.Anthropic(
             api_key=api_key,
@@ -37,6 +39,7 @@ class ClaudeMessagesVisionClient(LlmVisionClient):
         )
         self._max_tokens = int(max_tokens)
         self._retry_policy = retry_policy or RetryPolicy()
+        self._call_logger = call_logger or LlmCallLogger(base_dir=None)
 
     @staticmethod
     def _sanitize_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -114,18 +117,54 @@ class ClaudeMessagesVisionClient(LlmVisionClient):
         content = self._build_content_block(
             attachment=attachment, user_text=user_text,
         )
-        response = run_with_retry(
-            provider="claude",
-            operation=lambda: self._client.messages.create(
-                model=model,
-                max_tokens=self._max_tokens,
-                system=instructions,
-                tools=[tool_spec],
-                tool_choice={"type": "tool", "name": _TOOL_NAME},
-                messages=[{"role": "user", "content": content}],
+
+        request_summary = {
+            "instructions": instructions,
+            "user_text": user_text,
+            "attachment": LlmCallLogger.attachment_summary(
+                kind=attachment.kind,
+                filename=attachment.filename,
+                mime_type=getattr(attachment, "mime_type", None),
+                data=attachment.data,
             ),
-            policy=self._retry_policy,
+            "tool_spec": tool_spec,
+            "max_tokens": self._max_tokens,
+            "schema": response_model.__name__,
+        }
+
+        try:
+            response = run_with_retry(
+                provider="claude",
+                operation=lambda: self._client.messages.create(
+                    model=model,
+                    max_tokens=self._max_tokens,
+                    system=instructions,
+                    tools=[tool_spec],
+                    tool_choice={"type": "tool", "name": _TOOL_NAME},
+                    messages=[{"role": "user", "content": content}],
+                ),
+                policy=self._retry_policy,
+            )
+        except Exception as exc:
+            self._call_logger.log_call(
+                provider="claude",
+                model=model,
+                request_summary=request_summary,
+                response_payload=None,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
+
+        # Persistimos ANTES de parsear: si el parse de Pydantic explota
+        # (como pasaba con razon_corta), el response crudo del LLM ya
+        # quedó en disco para investigar.
+        self._call_logger.log_call(
+            provider="claude",
+            model=model,
+            request_summary=request_summary,
+            response_payload=response,
         )
+
         for block in response.content or []:
             if getattr(block, "type", None) != "tool_use":
                 continue

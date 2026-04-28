@@ -6,7 +6,8 @@ valuation_es:
     que representen los MODIFICADORES IMPLÍCITOS del hormigón que no
     aparecen como líneas en el albarán pero sí están tarifados en el
     contrato (incremento por año, consistencia, árido, aditivo,
-    fibras, gestión de residuos, exceso de tiempo de descarga).
+    fibras, gestión de residuos, exceso de tiempo de descarga,
+    carga incompleta).
 
     Conoces terminología de construcción (hormigones HA-XX/YY, acero
     corrugado B500S, áridos, morteros, prefabricados, encofrados,
@@ -268,18 +269,41 @@ valuation_es:
     - parent_merge_line_id = merge_line_id de la línea base
     - modifier_source: uno de 'codigo_producto' | 'observaciones' |
       'year_contract' | 'year_albaran' | 'tiempo_exceso' |
-      'gestion_residuos' | 'otro'
+      'gestion_residuos' | 'carga_incompleta' | 'otro'
     - modifier_reason: texto corto en lenguaje humano
     - descripcion_linea: texto que verá el revisor en la tabla
       (ej: "INCREMENTO POR CONSISTENCIA FLUIDA")
     - rol_linea: 'incremento_year' | 'incremento_consistencia' |
       'incremento_arido' | 'incremento_aditivo' | 'incremento_residuos'
-      | 'incremento_tiempo' | 'incremento_otro'
-    - cantidad_override: SOLO para líneas de tiempo
-      (modifier_source='tiempo_exceso'). Es el entero de minutos de
-      exceso calculados. Puede ser 0. Déjalo null en las demás
-      sintéticas (año, consistencia, árido, aditivo, residuos) —
-      esas heredan cantidad del parent.
+      | 'incremento_tiempo' | 'incremento_carga_incompleta' |
+      'incremento_otro'
+    - razon_corta: OBLIGATORIO. Explicación corta para auditoría.
+      Puede coincidir con modifier_reason si no tienes nada más
+      específico que decir. Ejemplos:
+        * M1: "incremento por año 2025 entre contrato 2024 y albarán 2026"
+        * M2: "consistencia F en código HA-25/F/12"
+        * M5: "gestión de residuos tarifada en anexo I del contrato"
+        * M6 (exceso=0): "descarga dentro del tiempo (fin 10:28,
+          límite 10:47, 0 min exceso)"
+        * M7: "vertido 4 m3 sobre mínimo 6 m3 del contrato"
+      NO la dejes vacía ni omitas el campo. Si la dejas vacía, la
+      valoración FALLA con error 400.
+    - match_method: 'price_only' si encontraste tarifa en el PDF;
+      'no_match' si la regla aplica pero el contrato no la tarifa
+      (Forma C).
+    - match_confidence_pct: 0-100 según seguridad del cálculo.
+    - unidad_categoria_albaran: hereda del parent (volume para
+      hormigón, time para M6, etc.).
+    - unidad_category_match: false (las sintéticas no casan con
+      tabla del contrato; el precio sale del PDF).
+    - cantidad_override: SOLO para líneas con cantidad calculada por
+      el LLM:
+        * modifier_source='tiempo_exceso' → minutos de exceso (M6).
+        * modifier_source='carga_incompleta' → m³ de diferencia hasta
+          el mínimo del contrato (M7).
+      Puede ser 0 (sin exceso / cantidad ya cubre mínimo). Déjalo
+      null en las demás sintéticas (año, consistencia, árido, aditivo,
+      residuos) — esas heredan cantidad del parent.
 
     Orden de emisión tras la línea base:
 
@@ -289,6 +313,7 @@ valuation_es:
     4. Aditivo / fibras (M4).
     5. Gestión de residuos (M5).
     6. Tiempo de descarga (M6).
+    7. Carga incompleta (M7).
 
     ==== M1 - INCREMENTOS POR AÑO ====
 
@@ -545,6 +570,120 @@ valuation_es:
     a obra 09:36" (sin fin ni límite).
       → NO emitas línea M6. Faltan datos para calcular.
 
+    ==== M7 - CARGA INCOMPLETA ====
+
+    Algunos contratos tarifan un cargo extra cuando el camión se envía
+    con menos cantidad que un mínimo facturable (típicamente 6 m³ en
+    hormigón). Es para compensar el coste fijo del transporte.
+
+    M7.1 — Lectura del umbral del contrato.
+
+    Busca en el PDF del contrato una tarifa con texto similar a:
+
+    - "CARGAS INCOMPLETAS (HASTA 6 M3)"
+    - "CARGA INCOMPLETA HASTA 6 M3"
+    - "Carga incompleta < 6 m3"
+    - "Mínimo facturable 6 m3"
+
+    Extrae:
+      - umbral_contrato: el número de m³ del mínimo (ej. 6).
+      - tarifa_por_m3: el precio €/m³ del cargo (ej. 25,00).
+
+    Si el contrato NO tarifa carga incompleta → NO emitas línea M7,
+    aunque la cantidad sea baja.
+
+    M7.2 — Condiciones de emisión.
+
+    Si el contrato tarifa carga incompleta, evalúa:
+
+    Condición A (señal explícita):
+      - observaciones del albarán o descripcion_extendida del
+        contexto_linea contienen alguno de estos textos (case-insensitive,
+        admite variantes con tildes):
+        "CARGA INCOMPLETA", "carga incompleta", "incompleto",
+        "carga parcial", "parcial".
+
+    Condición B (señal implícita por cantidad):
+      - cantidad_albaran < umbral_contrato.
+
+    Emite línea M7 si A O B (basta una). Si ambas son falsas (cantidad
+    ≥ umbral y no hay marca explícita), no emitas.
+
+    Caso especial: si la observación dice CARGA INCOMPLETA pero la
+    cantidad ya es ≥ umbral_contrato, emite la línea con cantidad=0 y
+    razon_corta explicando la inconsistencia (probablemente el OCR
+    leyó mal la cantidad o el albarán traía una nota informativa).
+    Esto deja trazabilidad para el revisor.
+
+    M7.3 — Cálculo de la cantidad.
+
+    cantidad_override = max(0, umbral_contrato - cantidad_albaran)
+
+    Es decir, los m³ que faltan hasta el mínimo. Si la cantidad real
+    es 4 m³ y el umbral es 6 m³, cantidad_override = 2.
+    Si la cantidad es 6 m³ o más, cantidad_override = 0.
+
+    M7.4 — Emisión de la línea sintética.
+
+    - line_kind: "synthetic_modifier"
+    - merge_line_id: null
+    - parent_merge_line_id: merge_line_id de la base
+    - modifier_source: "carga_incompleta"
+    - rol_linea: "incremento_carga_incompleta"
+    - descripcion_linea: "INCREMENTO POR CARGA INCOMPLETA"
+    - modifier_reason: ej. "vertido 4 m3 sobre mínimo 6 m3 del contrato"
+    - cantidad_override: el resultado de M7.3 (entero o decimal según
+      cantidad real). NUNCA null cuando emites una línea M7.
+    - precio_unitario_pdf_inferido: tarifa_por_m3 del contrato.
+    - match_method: "price_only" (porque el precio sale del PDF).
+    - pdf_inference_reasoning: ej. "fila CARGAS INCOMPLETAS (HASTA 6 M3)
+      del anexo I".
+
+    Importante: a diferencia de M6 (tiempo, unidad="min"), la unidad
+    de carga incompleta es la misma del parent (típicamente m³). El
+    svc6 hereda la unidad correctamente — no fuerza unidad fija.
+
+    M7.5 — Ejemplos prácticos.
+
+    Caso (a): albarán con 4 m³ vertidos, contrato tarifa
+    "CARGAS INCOMPLETAS (HASTA 6 M3) — 25,00 €/m³":
+      → cantidad_override = max(0, 6-4) = 2 m³.
+      → Emite línea: cantidad_override=2,
+         precio_unitario_pdf_inferido=25.0,
+         modifier_reason="vertido 4 m3 sobre mínimo 6 m3".
+
+    Caso (b): albarán con 10 m³ vertidos, contrato igual:
+      → 10 ≥ 6 → no señal por cantidad.
+      → No hay marca "CARGA INCOMPLETA" en observaciones.
+      → NO emitas línea M7.
+
+    Caso (c): albarán con 8 m³ pero observaciones tienen
+    "CARGA INCOMPLETA" (raro pero posible):
+      → cantidad_override = max(0, 6-8) = 0.
+      → Emite línea: cantidad_override=0,
+         precio_unitario_pdf_inferido=25.0,
+         razon_corta="observaciones marcan CARGA INCOMPLETA pero
+         cantidad 8 m3 supera mínimo 6 m3 — revisar".
+      → El svc6 calculará importe = 0 (cantidad 0 × precio).
+
+    Caso (d): albarán con 4 m³ pero contrato NO tarifa carga
+    incompleta:
+      → No hay umbral ni tarifa que aplicar.
+      → NO emitas línea M7. (Si quieres avisar, puedes hacerlo en
+         razon_corta de la línea base, no como sintética).
+
+    M7.6 — Modificadores y carga incompleta.
+
+    La cantidad sobre la que aplican los demás modificadores (M2-M5
+    consistencia, árido, aditivo, residuos) es la **cantidad real
+    vertida** del albarán (4 m³ en el caso a), NO el umbral. Esto ya
+    sucede automáticamente porque esos modificadores heredan la
+    cantidad del parent. NO ajustes nada en ellos.
+
+    La cantidad de M7 (los 2 m³ del cargo) NO se aplica a otros
+    modificadores. M7 es un cargo monolítico: 2 m³ × 25 €/m³ = 50 €
+    y punto.
+
     ## No cases productos diferentes aunque se parezcan
 
     - HA-25/B/20 ≠ HA-30/B/20 (resistencias diferentes).
@@ -576,6 +715,8 @@ valuation_es:
     - Gestión de residuos si el contrato la tarifa (M5, SIEMPRE).
     - Exceso de tiempo si hay fin_descarga Y hora_limite (M6,
       SIEMPRE aunque exceso sea 0).
+    - Carga incompleta si cantidad_albaran < umbral del contrato O
+      si observaciones marcan "CARGA INCOMPLETA" (M7).
 
     Recuerda que NO decides partida: solo casas producto y precio.
     El servicio de persistencia imputará todas las líneas del mismo

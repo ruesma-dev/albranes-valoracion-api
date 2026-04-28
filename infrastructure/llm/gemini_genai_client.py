@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from domain.models.llm_attachment import LlmAttachment
 from domain.ports.llm_client import LlmVisionClient
+from infrastructure.llm.llm_call_logger import LlmCallLogger
 from infrastructure.llm.retry_policy import RetryPolicy, run_with_retry
 
 logger = logging.getLogger(__name__)
@@ -22,9 +23,11 @@ class GeminiGenAiVisionClient(LlmVisionClient):
         api_key: str,
         *,
         retry_policy: RetryPolicy | None = None,
+        call_logger: LlmCallLogger | None = None,
     ) -> None:
         self._client = genai.Client(api_key=api_key)
         self._retry_policy = retry_policy or RetryPolicy()
+        self._call_logger = call_logger or LlmCallLogger(base_dir=None)
 
     def extract_document(
         self,
@@ -42,24 +45,54 @@ class GeminiGenAiVisionClient(LlmVisionClient):
             len(attachment.data), response_model.__name__,
         )
         response_schema = response_model.model_json_schema()
-        response = run_with_retry(
-            provider="gemini",
-            operation=lambda: self._client.models.generate_content(
-                model=model,
-                contents=[
-                    types.Part.from_bytes(
-                        data=attachment.data,
-                        mime_type=attachment.mime_type,
-                    ),
-                    user_text,
-                ],
-                config=types.GenerateContentConfig(
-                    system_instruction=instructions,
-                    response_mime_type="application/json",
-                    response_json_schema=response_schema,
-                ),
+
+        request_summary = {
+            "instructions": instructions,
+            "user_text": user_text,
+            "attachment": LlmCallLogger.attachment_summary(
+                kind=attachment.kind,
+                filename=attachment.filename,
+                mime_type=attachment.mime_type,
+                data=attachment.data,
             ),
-            policy=self._retry_policy,
+            "schema": response_model.__name__,
+        }
+
+        try:
+            response = run_with_retry(
+                provider="gemini",
+                operation=lambda: self._client.models.generate_content(
+                    model=model,
+                    contents=[
+                        types.Part.from_bytes(
+                            data=attachment.data,
+                            mime_type=attachment.mime_type,
+                        ),
+                        user_text,
+                    ],
+                    config=types.GenerateContentConfig(
+                        system_instruction=instructions,
+                        response_mime_type="application/json",
+                        response_json_schema=response_schema,
+                    ),
+                ),
+                policy=self._retry_policy,
+            )
+        except Exception as exc:
+            self._call_logger.log_call(
+                provider="gemini",
+                model=model,
+                request_summary=request_summary,
+                response_payload=None,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
+
+        self._call_logger.log_call(
+            provider="gemini",
+            model=model,
+            request_summary=request_summary,
+            response_payload=response,
         )
 
         parsed = getattr(response, "parsed", None)

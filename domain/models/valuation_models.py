@@ -1,7 +1,7 @@
 # domain/models/valuation_models.py
 from __future__ import annotations
 
-from typing import List, Literal, Optional
+from typing import Any, List, Literal, Optional
 
 from pydantic import Field, model_validator
 
@@ -30,6 +30,7 @@ ModifierSource = Literal[
     "year_albaran",
     "tiempo_exceso",
     "gestion_residuos",
+    "carga_incompleta",
     "otro",
 ]
 
@@ -40,7 +41,7 @@ class LineValuation(StrictSchemaModel):
     V3 añade el concepto de LÍNEA SINTÉTICA: el LLM puede emitir líneas
     adicionales a las del albarán para representar modificadores
     implícitos (año, consistencia, árido, aditivo, gestión de residuos,
-    exceso de tiempo). Estas líneas sintéticas llevan:
+    exceso de tiempo, carga incompleta). Estas líneas sintéticas llevan:
       - line_kind = 'synthetic_modifier'
       - merge_line_id = null
       - parent_merge_line_id = merge_line_id de la línea base que las origina
@@ -72,7 +73,8 @@ class LineValuation(StrictSchemaModel):
             "'from_albaran' si corresponde a una línea real del albarán. "
             "'synthetic_modifier' si es un modificador sintético generado "
             "por el valorador (incremento por año, consistencia, árido, "
-            "aditivo, gestión de residuos, exceso de tiempo)."
+            "aditivo, gestión de residuos, exceso de tiempo, carga "
+            "incompleta)."
         ),
     )
 
@@ -98,7 +100,8 @@ class LineValuation(StrictSchemaModel):
         description=(
             "Solo para sintéticas: razón corta en lenguaje humano "
             "(ej. 'consistencia F en código HA-25/F/20', 'año 2026 "
-            "vs contrato 2024', 'retraso 33 min sobre límite 10:47')."
+            "vs contrato 2024', 'retraso 33 min sobre límite 10:47', "
+            "'vertido 4 m3 sobre mínimo 6 m3 del contrato')."
         ),
     )
 
@@ -115,12 +118,14 @@ class LineValuation(StrictSchemaModel):
     cantidad_override: Optional[float] = Field(
         default=None,
         description=(
-            "Solo para sintéticas de tipo TIEMPO (modifier_source="
-            "'tiempo_exceso'). Minutos de exceso calculados por el LLM "
-            "a partir de contexto_linea.notas_tiempo. Puede ser 0. "
-            "Null para todas las demás sintéticas (heredan cantidad "
-            "del parent) y para líneas 'from_albaran' (tienen cantidad "
-            "propia en el albarán)."
+            "Solo para sintéticas con cantidad calculada por el LLM:\n"
+            "  * modifier_source='tiempo_exceso' → minutos de exceso "
+            "calculados a partir de contexto_linea.notas_tiempo (M6).\n"
+            "  * modifier_source='carga_incompleta' → m³ de diferencia "
+            "hasta el mínimo del contrato (M7).\n"
+            "Puede ser 0. Null para todas las demás sintéticas (heredan "
+            "cantidad del parent) y para líneas 'from_albaran' (tienen "
+            "cantidad propia en el albarán)."
         ),
     )
 
@@ -132,7 +137,8 @@ class LineValuation(StrictSchemaModel):
             "normalmente). Para sintéticas: 'incremento_year' | "
             "'incremento_consistencia' | 'incremento_arido' | "
             "'incremento_aditivo' | 'incremento_residuos' | "
-            "'incremento_tiempo' | 'incremento_otro'."
+            "'incremento_tiempo' | 'incremento_carga_incompleta' | "
+            "'incremento_otro'."
         ),
     )
 
@@ -188,9 +194,49 @@ class LineValuation(StrictSchemaModel):
     razon_corta: str = Field(
         description=(
             "Explicación corta del matching hecho, en español, para "
-            "auditoría."
+            "auditoría. Para líneas sintéticas: si el LLM la omite, "
+            "se rellena automáticamente con modifier_reason o "
+            "descripcion_linea (validador defensivo, ver "
+            "_backfill_razon_corta_for_synthetic)."
         ),
     )
+
+    # ----------------------------------------------------------------- #
+    # Fix defensivo (Tanda razon_corta — abr 2026):
+    #
+    # El prompt V3.x lista los campos obligatorios de cada sintética
+    # (paso 7) pero olvidaba 'razon_corta'. Como consecuencia el LLM
+    # devolvía sintéticas sin ese campo y Pydantic rompía con 400:
+    #     "lineas.N.razon_corta - Field required".
+    #
+    # En lugar de hacer 'razon_corta' Optional (que degradaría la
+    # auditoría de las líneas reales 'from_albaran'), interceptamos
+    # en mode='before' y SOLO para sintéticas copiamos
+    # modifier_reason o descripcion_linea como fallback.
+    #
+    # Las líneas 'from_albaran' no se tocan: si no traen razon_corta,
+    # siguen rompiendo (es un bug real del LLM, no un desalineamiento
+    # prompt/schema).
+    #
+    # Esto es defensa en profundidad: aunque el prompt YAML se haya
+    # corregido en paralelo (cuádruple verificación), si en el futuro
+    # algún proveedor de LLM se desvía, el sistema sigue funcionando.
+    # ----------------------------------------------------------------- #
+
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_razon_corta_for_synthetic(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            line_kind = data.get("line_kind")
+            razon_corta = data.get("razon_corta")
+            if line_kind == "synthetic_modifier" and not razon_corta:
+                fallback = (
+                    data.get("modifier_reason")
+                    or data.get("descripcion_linea")
+                    or "línea sintética sin razón explícita"
+                )
+                data["razon_corta"] = fallback
+        return data
 
     # ----------------------------------------------------------------- #
     # Validación cruzada: coherencia de campos según line_kind.

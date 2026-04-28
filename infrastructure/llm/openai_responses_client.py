@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from domain.models.llm_attachment import LlmAttachment
 from domain.ports.llm_client import LlmVisionClient
+from infrastructure.llm.llm_call_logger import LlmCallLogger
 from infrastructure.llm.openai_sdk_compat import patch_openai_pydantic_compat
 from infrastructure.llm.retry_policy import RetryPolicy, run_with_retry
 
@@ -23,10 +24,12 @@ class OpenAIResponsesVisionClient(LlmVisionClient):
         api_key: str,
         *,
         retry_policy: RetryPolicy | None = None,
+        call_logger: LlmCallLogger | None = None,
     ) -> None:
         patch_openai_pydantic_compat()
         self._client = OpenAI(api_key=api_key)
         self._retry_policy = retry_policy or RetryPolicy()
+        self._call_logger = call_logger or LlmCallLogger(base_dir=None)
 
     @staticmethod
     def _to_data_url(mime_type: str, data: bytes) -> str:
@@ -77,15 +80,44 @@ class OpenAIResponsesVisionClient(LlmVisionClient):
                 },
             ]
 
-        response = run_with_retry(
-            provider="openai",
-            operation=lambda: self._client.responses.parse(
-                model=model,
-                instructions=instructions,
-                input=[{"role": "user", "content": content}],
-                text_format=response_model,
+        request_summary = {
+            "instructions": instructions,
+            "user_text": user_text,
+            "attachment": LlmCallLogger.attachment_summary(
+                kind=attachment.kind,
+                filename=attachment.filename,
+                mime_type=getattr(attachment, "mime_type", None),
+                data=attachment.data,
             ),
-            policy=self._retry_policy,
+            "schema": response_model.__name__,
+        }
+
+        try:
+            response = run_with_retry(
+                provider="openai",
+                operation=lambda: self._client.responses.parse(
+                    model=model,
+                    instructions=instructions,
+                    input=[{"role": "user", "content": content}],
+                    text_format=response_model,
+                ),
+                policy=self._retry_policy,
+            )
+        except Exception as exc:
+            self._call_logger.log_call(
+                provider="openai",
+                model=model,
+                request_summary=request_summary,
+                response_payload=None,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
+
+        self._call_logger.log_call(
+            provider="openai",
+            model=model,
+            request_summary=request_summary,
+            response_payload=response,
         )
 
         if response.output_parsed is not None:
