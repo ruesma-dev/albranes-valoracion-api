@@ -50,6 +50,26 @@ _SQL_MERGE_HEADER = text(
 # COMPATIBILIDAD: para albaranes persistidos ANTES de la sub-tanda 2A
 # las dos columnas vienen NULL → unidad_categoria='unknown' y
 # contexto_linea=None, que es el comportamiento previo. No rompe.
+#
+# -----------------------------------------------------------------
+# Tanda descuento — abr 2026:
+#
+# Se añaden al SELECT las columnas ``descuento`` y ``precio_neto``
+# de ``albaran_lines_merge``. Viajan por el envelope hasta el svc6
+# donde se usan para calcular el importe valorado con descuento.
+#
+# NOTA sobre el alias existente ``precio_neto AS importe_albaran``:
+# Este alias viene de ANTES de la tanda descuento. Lo que el svc5
+# llamaba "importe_albaran" era en realidad el precio_neto unitario
+# de la línea (no el importe total = cantidad × precio). Esto no
+# cambia: el alias se mantiene tal cual para no romper aguas abajo.
+# Los campos NUEVOS (descuento_albaran, precio_neto_albaran) se
+# leen con alias propios y explícitos.
+#
+# Compatibilidad: para albaranes sin columna descuento (anteriores
+# al fix de svc3), la columna viene NULL → descuento=None en el
+# DTO → el svc6 lo interpreta como "sin descuento" → fórmula sin
+# cambios.
 # -----------------------------------------------------------------
 _SQL_ALBARAN_LINES = text(
     """
@@ -63,7 +83,9 @@ _SQL_ALBARAN_LINES = text(
         precio              AS precio_unitario_albaran,
         precio_neto         AS importe_albaran,
         codigo_imputacion   AS codigo_partida_albaran,
-        contexto_linea_json AS contexto_linea_json
+        contexto_linea_json AS contexto_linea_json,
+        descuento           AS descuento_albaran,
+        precio_neto         AS precio_neto_albaran
     FROM albaran_lines_merge
     WHERE document_id = :document_id
     ORDER BY line_index
@@ -204,6 +226,9 @@ class SqlAlchemyValuationContextRepository(ValuationContextRepository):
             importe_albaran=_opt_float(row.get("importe_albaran")),
             codigo_partida_albaran=_opt_str(row.get("codigo_partida_albaran")),
             contexto_linea_json=_opt_str(row.get("contexto_linea_json")),
+            # Tanda descuento — abr 2026
+            descuento=_opt_float(row.get("descuento_albaran")),
+            precio_neto=_opt_float(row.get("precio_neto_albaran")),
         )
 
     @staticmethod

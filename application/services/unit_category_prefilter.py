@@ -75,14 +75,6 @@ _UNIT_ALIASES: dict[str, UnitCategory] = {
 }
 
 
-# Hay que evitar que "ml" en mayúsculas (mililitros) se confunda con
-# "ml" (metro lineal). La tabla anterior mete "ml" como length porque
-# en construcción es el uso más habitual. Si el proveedor lo usa como
-# volumen (medicamentos, pinturas), ponedlo como "ML" en albarán y el
-# YAML del servicio 6 ya desambigua. Para el prefiltro nos basta con
-# length.
-
-
 def _parse_contexto_linea_json(raw: Optional[str]) -> Optional[ContextoLinea]:
     """Deserializa el JSON persistido en albaran_lines_merge.
 
@@ -127,6 +119,11 @@ class UnitCategoryPrefilter:
     Adicionalmente, deserializa el ``contexto_linea_json`` crudo que
     llega del repositorio y lo pasa ya tipado al ``AlbaranLineForValuation``
     que acabará en el prompt del LLM.
+
+    Tanda descuento (abr 2026): propaga ``descuento`` y ``precio_neto``
+    de cada línea cruda al DTO ``AlbaranLineForValuation``. Estos
+    campos viajarán por el envelope hasta el svc6 donde se aplicarán
+    en el cálculo del importe valorado.
     """
 
     def classify(self, unidad: str | None) -> UnitCategory:
@@ -162,6 +159,9 @@ class UnitCategoryPrefilter:
                 contexto_linea=_parse_contexto_linea_json(
                     line.contexto_linea_json
                 ),
+                # Tanda descuento — abr 2026
+                descuento_albaran=line.descuento,
+                precio_neto_albaran=line.precio_neto,
             )
             for line in raw_lines
         ]

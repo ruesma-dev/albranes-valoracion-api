@@ -31,6 +31,27 @@ class AlbaranLineForValuation:
     ``albaran_lines_merge.contexto_linea_json``. Null si la línea no
     es de familia compleja. El prompt V2 del svc5 lo consume para
     aplicar las reglas Forma A/B/C de matching de modificadores.
+
+    -------------------------------------------------------------------
+    Tanda descuento (abr 2026):
+    -------------------------------------------------------------------
+    Se añaden ``descuento_albaran`` y ``precio_neto_albaran`` para que
+    el descuento llegue del merge (svc3) al builder (svc6) a través
+    del envelope de valoración.
+
+    El bug original: el LLM valoraba con ``cantidad × precio`` sin
+    aplicar el descuento del albarán. Con estos campos en el contexto:
+      - El LLM los ve como información de la línea (puede usarlos para
+        razonar sobre las observaciones).
+      - El svc6 los lee del envelope y aplica el descuento al importe
+        valorado: ``importe = cantidad × precio_contrato × (1 - d/100)``.
+
+    Decisión de negocio (Construcciones Ruesma):
+      - El descuento del albarán se aplica al precio del CONTRATO
+        cuando se calcula el importe valorado.
+      - Las líneas sintéticas (M1-M7) heredan el descuento de su línea
+        base padre.
+    -------------------------------------------------------------------
     """
 
     merge_line_id: int
@@ -44,6 +65,9 @@ class AlbaranLineForValuation:
     importe_albaran: Optional[float]
     codigo_partida_albaran: Optional[str]
     contexto_linea: Optional[ContextoLinea] = None
+    # Tanda descuento — abr 2026
+    descuento_albaran: Optional[float] = None
+    precio_neto_albaran: Optional[float] = None
 
 
 @dataclass(frozen=True)

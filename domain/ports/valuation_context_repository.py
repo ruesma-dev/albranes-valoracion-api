@@ -44,6 +44,22 @@ class RawAlbaranLine:
     # -----------------------------------------------------------------
     contexto_linea_json: Optional[str] = None
 
+    # -----------------------------------------------------------------
+    # Tanda descuento — abr 2026
+    #
+    # Descuento porcentual (0-100) y precio neto unitario de la línea
+    # tal como están en albaran_lines_merge. Se propagan al
+    # AlbaranLineForValuation → envelope → svc6 para que el builder
+    # aplique el descuento al calcular el importe valorado.
+    #
+    # Compatibilidad retroactiva: ambos con default None. Albaranes
+    # anteriores a la tanda descuento / sin descuento llegan como
+    # None → el builder los interpreta como "sin descuento" y la
+    # fórmula se comporta como antes.
+    # -----------------------------------------------------------------
+    descuento: Optional[float] = None
+    precio_neto: Optional[float] = None
+
 
 @dataclass(frozen=True)
 class RawContratoLine:
