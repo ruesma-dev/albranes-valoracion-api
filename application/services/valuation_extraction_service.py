@@ -5,7 +5,7 @@ import hashlib
 import json
 import logging
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, Iterable, Type
+from typing import Any, Dict, Iterable, Optional, Type
 
 from pydantic import BaseModel
 
@@ -38,6 +38,46 @@ class ProviderValuationResult:
     debug_payload: Dict[str, Any]
 
 
+# -----------------------------------------------------------------
+# Texto que se añade al user_text cuando NO hay PDF de contrato.
+#
+# Sustituye al hack anterior del PDF dummy de 15 bytes que Gemini
+# rechazaba con "The document has no pages." Ahora el LLM recibe
+# instrucciones explícitas sobre qué hacer en este caso:
+#
+#   - Solo fase 1a: matchear contra las líneas del contrato que
+#     ya tiene en el contexto (vienen de albaran_contrato_lines_merge,
+#     persistidas desde el ERP de Sigrid).
+#   - precio_unitario_pdf_inferido = null (no hay PDF que leer).
+#   - Para líneas que no encuentren match, marcar match_method='no_match'.
+#
+# El revisor en el front decidirá qué hacer con las líneas no
+# matcheadas (revaluar manualmente, asignar precio, etc.).
+# -----------------------------------------------------------------
+_NOTA_SIN_PDF = (
+    "\n\n=== AVISO: NO HAY PDF DE CONTRATO ===\n"
+    "Este albarán NO tiene PDF de contrato disponible. "
+    "Realiza SOLO la fase 1a de matching: busca correspondencias "
+    "entre las líneas del albarán y las líneas del contrato que "
+    "tienes en el bloque 'lineas_contrato' del contexto (estas "
+    "líneas vienen del ERP).\n\n"
+    "Reglas para este caso:\n"
+    "  - precio_unitario_pdf_inferido = null en TODAS las líneas "
+    "(no hay PDF que leer).\n"
+    "  - pdf_inference_reasoning = null.\n"
+    "  - tarifa_pdf_encontrada = null.\n"
+    "  - Para líneas que SÍ encuentres en lineas_contrato: "
+    "rellena matched_contrato_line_id y precio_unitario_contrato_db "
+    "con datos de esa línea.\n"
+    "  - Para líneas que NO encuentres en lineas_contrato: "
+    "match_method='no_match', matched_contrato_line_id=null, "
+    "precio_unitario_contrato_db=null. El revisor las decidirá "
+    "manualmente.\n"
+    "  - NO emitas líneas sintéticas (modificadores) en este caso "
+    "— sin PDF no se pueden inferir tarifas de modificadores."
+)
+
+
 def _albaran_line_to_dict(line: AlbaranLineForValuation) -> Dict[str, Any]:
     """Serializa AlbaranLineForValuation a dict serializable en JSON.
 
@@ -61,8 +101,27 @@ class ValuationExtractionService:
     """Orquesta la llamada a los proveedores LLM habilitados.
 
     Mismo patrón que ``AlbaranExtractionService`` del servicio 2:
-    recibe el contexto ya construido y el adjunto (PDF del contrato)
-    y delega en cada proveedor configurado.
+    recibe el contexto ya construido y, OPCIONALMENTE, el adjunto
+    (PDF del contrato) y delega en cada proveedor configurado.
+
+    -----------------------------------------------------------------
+    Tanda PDF opcional (abr/may 2026):
+    -----------------------------------------------------------------
+    Antes, cuando el contrato no tenía PDF en SharePoint, el servicio
+    inventaba un attachment dummy con un PDF vacío de 15 bytes para
+    cumplir el contrato del port (que exigía attachment obligatorio).
+
+    Ese hack:
+      - Funcionaba con Anthropic (lo aceptaba silenciosamente).
+      - Funcionaba con OpenAI (lo aceptaba silenciosamente).
+      - **Fallaba con Gemini**: 400 INVALID_ARGUMENT
+        "The document has no pages."
+
+    Tras esta tanda, el port acepta ``attachment=None`` y los 3
+    clientes LLM lo manejan correctamente (solo texto, sin bloque
+    de documento). Aquí se añade al user_text la nota
+    ``_NOTA_SIN_PDF`` que guía al LLM para hacer SOLO fase 1a.
+    -----------------------------------------------------------------
     """
 
     def __init__(
@@ -79,7 +138,11 @@ class ValuationExtractionService:
         self._prompt_key = prompt_key
 
     @staticmethod
-    def _attachment_debug(attachment: LlmAttachment) -> Dict[str, Any]:
+    def _attachment_debug(
+        attachment: Optional[LlmAttachment],
+    ) -> Optional[Dict[str, Any]]:
+        if attachment is None:
+            return None
         return {
             "kind": attachment.kind,
             "filename": attachment.filename,
@@ -127,7 +190,7 @@ class ValuationExtractionService:
         self,
         *,
         context: ContextoValoracion,
-        pdf_attachment: LlmAttachment | None,
+        pdf_attachment: Optional[LlmAttachment],
     ) -> Dict[str, ProviderValuationResult]:
         spec = self._prompts.get(self._prompt_key)
         response_model: Type[BaseModel] = self._schemas.get(spec.schema)
@@ -137,22 +200,12 @@ class ValuationExtractionService:
             context=context,
         )
 
-        # Si no hay PDF, creamos un attachment dummy con un PDF vacío
-        # NO: mejor mandamos el texto sin PDF. Los clientes LLM están
-        # preparados para aceptar attachments opcionales solo si se
-        # pasan. Como nuestra interfaz actual exige attachment, creamos
-        # un attachment TEXT embebido indicando la ausencia.
+        # Si NO hay PDF, añadimos al user_text las instrucciones
+        # explícitas para hacer solo fase 1a, y dejamos el attachment
+        # como None para que los clientes LLM no manden bloque de
+        # documento. Ya NO se inventa un PDF dummy.
         if pdf_attachment is None:
-            # Lo tratamos como texto plano adjunto: un PDF vacío
-            # con un placeholder. En la práctica: si no hay PDF, la
-            # IA solo podrá hacer fase 1a (match por líneas de BD).
-            user_text = (
-                user_text
-                + "\n\nNOTA IMPORTANTE: no se ha podido adjuntar el PDF "
-                "del contrato. Realiza SOLO la fase 1a (matching por "
-                "descripción contra la tabla de contrato). Deja "
-                "precio_unitario_pdf_inferido=null en todas las líneas."
-            )
+            user_text = user_text + _NOTA_SIN_PDF
 
         results: Dict[str, ProviderValuationResult] = {}
         for provider_spec in self._providers:
@@ -182,22 +235,13 @@ class ValuationExtractionService:
         *,
         spec_system: str,
         user_text: str,
-        attachment: LlmAttachment | None,
+        attachment: Optional[LlmAttachment],
         provider_spec: ProviderClientSpec,
         response_model: Type[BaseModel],
         schema_name: str,
     ) -> ProviderValuationResult:
-        # Si no hay attachment, creamos un PDF placeholder de 1 byte.
-        # (Es un hack pero mantiene la interfaz del puerto igual que
-        # en el servicio 2. Los clientes LLM aceptan PDFs pequeños.)
-        if attachment is None:
-            attachment = LlmAttachment(
-                kind="pdf",
-                filename="empty.pdf",
-                mime_type="application/pdf",
-                data=b"%PDF-1.4\n%%EOF\n",
-            )
-
+        # Ya NO se inventa un PDF dummy. Si attachment es None, el
+        # cliente LLM enviará solo texto al proveedor.
         parsed = provider_spec.client.extract_document(
             model=provider_spec.model_name,
             instructions=spec_system,

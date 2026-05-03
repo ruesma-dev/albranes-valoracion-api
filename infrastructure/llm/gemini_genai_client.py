@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Type
+from typing import Any, Optional, Type
 
 from google import genai
 from google.genai import types
@@ -11,7 +11,6 @@ from pydantic import BaseModel
 
 from domain.models.llm_attachment import LlmAttachment
 from domain.ports.llm_client import LlmVisionClient
-from infrastructure.llm.llm_call_logger import LlmCallLogger
 from infrastructure.llm.retry_policy import RetryPolicy, run_with_retry
 
 logger = logging.getLogger(__name__)
@@ -23,11 +22,9 @@ class GeminiGenAiVisionClient(LlmVisionClient):
         api_key: str,
         *,
         retry_policy: RetryPolicy | None = None,
-        call_logger: LlmCallLogger | None = None,
     ) -> None:
         self._client = genai.Client(api_key=api_key)
         self._retry_policy = retry_policy or RetryPolicy()
-        self._call_logger = call_logger or LlmCallLogger(base_dir=None)
 
     def extract_document(
         self,
@@ -35,64 +32,47 @@ class GeminiGenAiVisionClient(LlmVisionClient):
         model: str,
         instructions: str,
         user_text: str,
-        attachment: LlmAttachment,
+        attachment: Optional[LlmAttachment] = None,
         response_model: Type[BaseModel],
     ) -> BaseModel:
+        att_kind = attachment.kind if attachment is not None else "text_only"
+        att_filename = attachment.filename if attachment is not None else "n/a"
+        att_size = len(attachment.data) if attachment is not None else 0
         logger.info(
             "Gemini valuation call. model=%s kind=%s filename=%s size=%s "
             "schema=%s",
-            model, attachment.kind, attachment.filename,
-            len(attachment.data), response_model.__name__,
+            model, att_kind, att_filename, att_size, response_model.__name__,
         )
         response_schema = response_model.model_json_schema()
 
-        request_summary = {
-            "instructions": instructions,
-            "user_text": user_text,
-            "attachment": LlmCallLogger.attachment_summary(
-                kind=attachment.kind,
-                filename=attachment.filename,
-                mime_type=attachment.mime_type,
-                data=attachment.data,
-            ),
-            "schema": response_model.__name__,
-        }
-
-        try:
-            response = run_with_retry(
-                provider="gemini",
-                operation=lambda: self._client.models.generate_content(
-                    model=model,
-                    contents=[
-                        types.Part.from_bytes(
-                            data=attachment.data,
-                            mime_type=attachment.mime_type,
-                        ),
-                        user_text,
-                    ],
-                    config=types.GenerateContentConfig(
-                        system_instruction=instructions,
-                        response_mime_type="application/json",
-                        response_json_schema=response_schema,
-                    ),
-                ),
-                policy=self._retry_policy,
+        # Construcción de contents según haya o no adjunto.
+        # Antes de esta tanda, el servicio inventaba un PDF dummy de
+        # 15 bytes (b"%PDF-1.4\n%%EOF\n") cuando no había PDF real.
+        # Gemini lo rechazaba con 400 INVALID_ARGUMENT: "The document
+        # has no pages." Ahora si attachment es None, simplemente NO
+        # añadimos la Part del PDF al contents — solo texto puro.
+        contents: list[Any] = []
+        if attachment is not None:
+            contents.append(
+                types.Part.from_bytes(
+                    data=attachment.data,
+                    mime_type=attachment.mime_type,
+                )
             )
-        except Exception as exc:
-            self._call_logger.log_call(
-                provider="gemini",
-                model=model,
-                request_summary=request_summary,
-                response_payload=None,
-                error=f"{type(exc).__name__}: {exc}",
-            )
-            raise
+        contents.append(user_text)
 
-        self._call_logger.log_call(
+        response = run_with_retry(
             provider="gemini",
-            model=model,
-            request_summary=request_summary,
-            response_payload=response,
+            operation=lambda: self._client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=instructions,
+                    response_mime_type="application/json",
+                    response_json_schema=response_schema,
+                ),
+            ),
+            policy=self._retry_policy,
         )
 
         parsed = getattr(response, "parsed", None)

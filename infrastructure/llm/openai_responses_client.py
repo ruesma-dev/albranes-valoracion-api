@@ -4,14 +4,13 @@ from __future__ import annotations
 import base64
 import logging
 import re
-from typing import Type
+from typing import Optional, Type
 
 from openai import OpenAI
 from pydantic import BaseModel
 
 from domain.models.llm_attachment import LlmAttachment
 from domain.ports.llm_client import LlmVisionClient
-from infrastructure.llm.llm_call_logger import LlmCallLogger
 from infrastructure.llm.openai_sdk_compat import patch_openai_pydantic_compat
 from infrastructure.llm.retry_policy import RetryPolicy, run_with_retry
 
@@ -24,12 +23,10 @@ class OpenAIResponsesVisionClient(LlmVisionClient):
         api_key: str,
         *,
         retry_policy: RetryPolicy | None = None,
-        call_logger: LlmCallLogger | None = None,
     ) -> None:
         patch_openai_pydantic_compat()
         self._client = OpenAI(api_key=api_key)
         self._retry_policy = retry_policy or RetryPolicy()
-        self._call_logger = call_logger or LlmCallLogger(base_dir=None)
 
     @staticmethod
     def _to_data_url(mime_type: str, data: bytes) -> str:
@@ -47,17 +44,23 @@ class OpenAIResponsesVisionClient(LlmVisionClient):
         model: str,
         instructions: str,
         user_text: str,
-        attachment: LlmAttachment,
+        attachment: Optional[LlmAttachment] = None,
         response_model: Type[BaseModel],
     ) -> BaseModel:
+        att_kind = attachment.kind if attachment is not None else "text_only"
+        att_filename = attachment.filename if attachment is not None else "n/a"
+        att_size = len(attachment.data) if attachment is not None else 0
         logger.info(
             "OpenAI valuation call. model=%s kind=%s filename=%s size=%s "
             "schema=%s",
-            model, attachment.kind, attachment.filename,
-            len(attachment.data), response_model.__name__,
+            model, att_kind, att_filename, att_size, response_model.__name__,
         )
 
-        if attachment.kind == "pdf":
+        # Construcción del content según haya o no adjunto.
+        if attachment is None:
+            # Modo texto puro: solo se envía el user_text.
+            content = [{"type": "input_text", "text": user_text}]
+        elif attachment.kind == "pdf":
             safe_name = self._safe_filename(attachment.filename, "contrato.pdf")
             content = [
                 {
@@ -80,44 +83,15 @@ class OpenAIResponsesVisionClient(LlmVisionClient):
                 },
             ]
 
-        request_summary = {
-            "instructions": instructions,
-            "user_text": user_text,
-            "attachment": LlmCallLogger.attachment_summary(
-                kind=attachment.kind,
-                filename=attachment.filename,
-                mime_type=getattr(attachment, "mime_type", None),
-                data=attachment.data,
-            ),
-            "schema": response_model.__name__,
-        }
-
-        try:
-            response = run_with_retry(
-                provider="openai",
-                operation=lambda: self._client.responses.parse(
-                    model=model,
-                    instructions=instructions,
-                    input=[{"role": "user", "content": content}],
-                    text_format=response_model,
-                ),
-                policy=self._retry_policy,
-            )
-        except Exception as exc:
-            self._call_logger.log_call(
-                provider="openai",
-                model=model,
-                request_summary=request_summary,
-                response_payload=None,
-                error=f"{type(exc).__name__}: {exc}",
-            )
-            raise
-
-        self._call_logger.log_call(
+        response = run_with_retry(
             provider="openai",
-            model=model,
-            request_summary=request_summary,
-            response_payload=response,
+            operation=lambda: self._client.responses.parse(
+                model=model,
+                instructions=instructions,
+                input=[{"role": "user", "content": content}],
+                text_format=response_model,
+            ),
+            policy=self._retry_policy,
         )
 
         if response.output_parsed is not None:

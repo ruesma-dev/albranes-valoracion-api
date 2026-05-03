@@ -4,14 +4,13 @@ from __future__ import annotations
 import base64
 import json
 import logging
-from typing import Any, Type
+from typing import Any, Optional, Type
 
 import anthropic
 from pydantic import BaseModel
 
 from domain.models.llm_attachment import LlmAttachment
 from domain.ports.llm_client import LlmVisionClient
-from infrastructure.llm.llm_call_logger import LlmCallLogger
 from infrastructure.llm.retry_policy import RetryPolicy, run_with_retry
 
 logger = logging.getLogger(__name__)
@@ -31,7 +30,6 @@ class ClaudeMessagesVisionClient(LlmVisionClient):
         max_tokens: int = 8192,
         timeout_s: int = 180,
         retry_policy: RetryPolicy | None = None,
-        call_logger: LlmCallLogger | None = None,
     ) -> None:
         self._client = anthropic.Anthropic(
             api_key=api_key,
@@ -39,7 +37,6 @@ class ClaudeMessagesVisionClient(LlmVisionClient):
         )
         self._max_tokens = int(max_tokens)
         self._retry_policy = retry_policy or RetryPolicy()
-        self._call_logger = call_logger or LlmCallLogger(base_dir=None)
 
     @staticmethod
     def _sanitize_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -69,9 +66,14 @@ class ClaudeMessagesVisionClient(LlmVisionClient):
     def _build_content_block(
         self,
         *,
-        attachment: LlmAttachment,
+        attachment: Optional[LlmAttachment],
         user_text: str,
     ) -> list[dict[str, Any]]:
+        # Modo texto puro (sin adjunto): para valoración sin PDF de
+        # contrato (solo fase 1a sobre la tabla del ERP).
+        if attachment is None:
+            return [{"type": "text", "text": user_text}]
+
         if attachment.kind == "pdf":
             document_block: dict[str, Any] = {
                 "type": "document",
@@ -82,6 +84,7 @@ class ClaudeMessagesVisionClient(LlmVisionClient):
                 },
             }
             return [document_block, {"type": "text", "text": user_text}]
+
         image_block: dict[str, Any] = {
             "type": "image",
             "source": {
@@ -98,14 +101,17 @@ class ClaudeMessagesVisionClient(LlmVisionClient):
         model: str,
         instructions: str,
         user_text: str,
-        attachment: LlmAttachment,
+        attachment: Optional[LlmAttachment] = None,
         response_model: Type[BaseModel],
     ) -> BaseModel:
+        att_kind = attachment.kind if attachment is not None else "text_only"
+        att_filename = attachment.filename if attachment is not None else "n/a"
+        att_size = len(attachment.data) if attachment is not None else 0
         logger.info(
             "Claude valuation call. model=%s kind=%s filename=%s size=%s "
             "schema=%s user_text_len=%s",
-            model, attachment.kind, attachment.filename,
-            len(attachment.data), response_model.__name__, len(user_text),
+            model, att_kind, att_filename, att_size,
+            response_model.__name__, len(user_text),
         )
         raw_schema = response_model.model_json_schema()
         input_schema = self._sanitize_schema(raw_schema)
@@ -117,54 +123,18 @@ class ClaudeMessagesVisionClient(LlmVisionClient):
         content = self._build_content_block(
             attachment=attachment, user_text=user_text,
         )
-
-        request_summary = {
-            "instructions": instructions,
-            "user_text": user_text,
-            "attachment": LlmCallLogger.attachment_summary(
-                kind=attachment.kind,
-                filename=attachment.filename,
-                mime_type=getattr(attachment, "mime_type", None),
-                data=attachment.data,
-            ),
-            "tool_spec": tool_spec,
-            "max_tokens": self._max_tokens,
-            "schema": response_model.__name__,
-        }
-
-        try:
-            response = run_with_retry(
-                provider="claude",
-                operation=lambda: self._client.messages.create(
-                    model=model,
-                    max_tokens=self._max_tokens,
-                    system=instructions,
-                    tools=[tool_spec],
-                    tool_choice={"type": "tool", "name": _TOOL_NAME},
-                    messages=[{"role": "user", "content": content}],
-                ),
-                policy=self._retry_policy,
-            )
-        except Exception as exc:
-            self._call_logger.log_call(
-                provider="claude",
-                model=model,
-                request_summary=request_summary,
-                response_payload=None,
-                error=f"{type(exc).__name__}: {exc}",
-            )
-            raise
-
-        # Persistimos ANTES de parsear: si el parse de Pydantic explota
-        # (como pasaba con razon_corta), el response crudo del LLM ya
-        # quedó en disco para investigar.
-        self._call_logger.log_call(
+        response = run_with_retry(
             provider="claude",
-            model=model,
-            request_summary=request_summary,
-            response_payload=response,
+            operation=lambda: self._client.messages.create(
+                model=model,
+                max_tokens=self._max_tokens,
+                system=instructions,
+                tools=[tool_spec],
+                tool_choice={"type": "tool", "name": _TOOL_NAME},
+                messages=[{"role": "user", "content": content}],
+            ),
+            policy=self._retry_policy,
         )
-
         for block in response.content or []:
             if getattr(block, "type", None) != "tool_use":
                 continue
