@@ -26,6 +26,7 @@ from infrastructure.llm.claude_messages_client import (
     ClaudeMessagesVisionClient,
 )
 from infrastructure.llm.gemini_genai_client import GeminiGenAiVisionClient
+from infrastructure.llm.llm_call_logger import LlmCallLogger
 from infrastructure.llm.openai_responses_client import (
     OpenAIResponsesVisionClient,
 )
@@ -67,6 +68,22 @@ def build_app(settings: Settings) -> FastAPI:
         backoff_cap_s=settings.llm_backoff_cap_s,
     )
 
+    # ----------------------------------------------------------- #
+    # IA call logger — para tuning de prompts.
+    # Si IA_LOGGING_ENABLED=false, base_dir=None y todas las llamadas
+    # a log_call() son no-op (cero coste, cero I/O).
+    # ----------------------------------------------------------- #
+    ia_log_dir = (
+        settings.ia_logging_dir
+        if settings.ia_logging_enabled else None
+    )
+    call_logger = LlmCallLogger(base_dir=ia_log_dir)
+    logger.info(
+        "[svc5][wiring] IA call logger %s (dir=%s)",
+        "ACTIVO" if call_logger.enabled else "INACTIVO",
+        settings.ia_logging_dir if call_logger.enabled else "n/a",
+    )
+
     providers: list[ProviderClientSpec] = []
     if settings.claude_enabled:
         providers.append(
@@ -78,6 +95,7 @@ def build_app(settings: Settings) -> FastAPI:
                     max_tokens=settings.anthropic_max_tokens,
                     timeout_s=settings.anthropic_timeout_s,
                     retry_policy=retry_policy,
+                    call_logger=call_logger,
                 ),
             )
         )
@@ -89,6 +107,7 @@ def build_app(settings: Settings) -> FastAPI:
                 client=GeminiGenAiVisionClient(
                     api_key=settings.gemini_api_key or "",
                     retry_policy=retry_policy,
+                    call_logger=call_logger,
                 ),
             )
         )
@@ -100,6 +119,7 @@ def build_app(settings: Settings) -> FastAPI:
                 client=OpenAIResponsesVisionClient(
                     settings.openai_api_key or "",
                     retry_policy=retry_policy,
+                    call_logger=call_logger,
                 ),
             )
         )
@@ -132,6 +152,10 @@ def build_app(settings: Settings) -> FastAPI:
             "version": settings.service_version,
             "enabled_providers": settings.enabled_llm_providers,
             "prompt_key": settings.prompt_key,
+            "ia_logging": {
+                "enabled": call_logger.enabled,
+                "dir": settings.ia_logging_dir if call_logger.enabled else None,
+            },
         }
 
     @app.post("/v1/albaranes/value")
@@ -155,6 +179,87 @@ def build_app(settings: Settings) -> FastAPI:
             raise HTTPException(
                 status_code=500,
                 detail=f"Error valorando albarán: {exc}",
+            ) from exc
+
+    # ----------------------------------------------------------- #
+    # GET /v1/debug/ia-logs[?date=YYYYMMDD]
+    # Lista los archivos JSON guardados por LlmCallLogger.
+    # Útil para tuning de prompts: ves qué se mandó y qué respondió
+    # cada modelo sin tener que abrir el explorador de archivos.
+    # ----------------------------------------------------------- #
+    @app.get("/v1/debug/ia-logs")
+    def list_ia_logs(date: str | None = None) -> Dict[str, Any]:
+        if not call_logger.enabled:
+            return {
+                "enabled": False,
+                "message": (
+                    "IA logging desactivado. Pon IA_LOGGING_ENABLED=true "
+                    "en el .env para activarlo."
+                ),
+                "files": [],
+            }
+        from pathlib import Path as _Path
+        base = _Path(settings.ia_logging_dir)
+        if not base.exists():
+            return {
+                "enabled": True,
+                "base_dir": str(base),
+                "message": "Aún no hay logs (carpeta no creada).",
+                "files": [],
+            }
+
+        files: list[dict[str, Any]] = []
+        days_iter = (
+            [base / date] if date
+            else sorted(
+                [p for p in base.iterdir() if p.is_dir()],
+                reverse=True,
+            )
+        )
+        for day_dir in days_iter:
+            if not day_dir.exists() or not day_dir.is_dir():
+                continue
+            for f in sorted(day_dir.glob("*.json")):
+                stat = f.stat()
+                files.append({
+                    "filename": f.name,
+                    "day": day_dir.name,
+                    "size_bytes": stat.st_size,
+                    "modified_utc": f"{stat.st_mtime:.0f}",
+                    "relative_path": str(f.relative_to(base)),
+                })
+        return {
+            "enabled": True,
+            "base_dir": str(base),
+            "filter_date": date,
+            "count": len(files),
+            "files": files,
+        }
+
+    @app.get("/v1/debug/ia-logs/{day}/{filename}")
+    def read_ia_log(day: str, filename: str) -> Dict[str, Any]:
+        """Devuelve el contenido de un archivo de log concreto."""
+        if not call_logger.enabled:
+            raise HTTPException(
+                status_code=404,
+                detail="IA logging desactivado.",
+            )
+        from pathlib import Path as _Path
+        if "/" in filename or "\\" in filename or ".." in filename:
+            raise HTTPException(status_code=400, detail="filename inválido")
+        if "/" in day or "\\" in day or ".." in day:
+            raise HTTPException(status_code=400, detail="day inválido")
+        target = _Path(settings.ia_logging_dir) / day / filename
+        if not target.exists() or not target.is_file():
+            raise HTTPException(status_code=404, detail="no encontrado")
+        try:
+            import json as _json
+            with target.open("r", encoding="utf-8") as fp:
+                return _json.load(fp)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"error leyendo log: {exc}",
             ) from exc
 
     return app

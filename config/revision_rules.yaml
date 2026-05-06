@@ -1,0 +1,160 @@
+# config/revision_rules.yaml
+#
+# =====================================================================
+# CHECKLIST DE REGLAS DE REVISIÓN - FASE 2
+# =====================================================================
+#
+# Este archivo contiene las reglas que la IA fase 2 aplica al revisar
+# el JSON extraído por la fase 1. Es EDITABLE: cada vez que detectes
+# un patrón de error nuevo en producción, añade una regla aquí y
+# reinicia sv2 (no hace falta tocar código).
+#
+# Cómo se usan:
+#   1. Al arrancar sv2, RevisionRulesRepository carga este YAML.
+#   2. Cuando llega una petición fase 2, el servicio renderiza estas
+#      reglas como un texto formateado y las inyecta en el prompt
+#      junto al PDF y al JSON de fase 1.
+#   3. La IA debe RECORRERLAS UNA A UNA antes de devolver resultado.
+#
+# Filosofía: revisión exhaustiva, pero solo cambia cuando:
+#   (a) el caso coincide con una regla de la checklist, O
+#   (b) hay alta confianza de error.
+# Ante la duda, NO se cambia nada (mejor dejar fase 1 que romperla).
+#
+# Formato de cada regla:
+#
+#   - id: snake_case_corto    # identificador único
+#     titulo: Frase corta     # se muestra en el prompt
+#     descripcion: |           # explicación detallada multilinea
+#       Bloque de texto en español que la IA leerá literalmente.
+#       Sé explícito: di qué buscar y qué hacer si lo encuentras.
+#     ejemplo: |               # opcional pero MUY recomendado
+#       Caso concreto antes/después.
+#       Sin ejemplos, la IA tiende a interpretar mal las reglas.
+#
+# Para añadir una regla nueva, copia el bloque de plantilla del final
+# del archivo y descomenta.
+# =====================================================================
+
+reglas:
+
+  # -----------------------------------------------------------------
+  - id: importe_minimo
+    titulo: Ningún importe ni precio unitario puede ser inferior a 0.01
+    descripcion: |
+      Los importes en albaranes de obra están en euros y siempre son
+      mayores o iguales a 0,01 €. Si en el JSON de fase 1 ves un
+      `precio`, `precio_neto` o `importe` MENOR que 0.01 (por ejemplo
+      0.005, 0.0125, 0.0085), eso casi siempre es un error de OCR del
+      separador decimal o de un cero líder mal leído.
+
+      Causas habituales:
+        - El separador decimal se interpretó mal (coma vs punto).
+          Ejemplo: "0.85" leído como "0.0085".
+        - El número está en miles (1.50 que en realidad es 1500).
+        - Un cero líder se perdió (.85 leído como 0.0085).
+
+      Acción: relee el PDF en esa zona, identifica el valor correcto
+      y corrígelo en `documento_revisado`. Aplica también la
+      coherencia: si el resto de líneas parecidas valen unos pocos
+      euros, el "0.005" probablemente sea "0.50" o "5.00".
+    ejemplo: |
+      Si en el albarán se lee "0,85 €/kg" en la columna PVP y fase 1
+      extrajo `precio: 0.0085`, el valor correcto es `precio: 0.85`.
+      En razonamientos, añade:
+        campo: "lineas[N].precio"
+        descripcion: "Cambiado precio de 0.0085 a 0.85 — el albarán
+                      muestra claramente 0,85 €/kg en la columna PVP."
+        patron_aplicado: "importe_minimo"
+
+  # -----------------------------------------------------------------
+  - id: unidad_medida_camion
+    titulo: Coherencia de unidad de medida en albaranes de camión
+    descripcion: |
+      En albaranes que vienen de un camión (con tara registrada), la
+      unidad de medida hay que razonarla por el orden de magnitud de
+      la cantidad. Históricamente fase 1 tiende a poner "Toneladas"
+      por defecto sin verificar si tiene sentido físico.
+
+      Heurística para camión (carga útil típica 5-30 toneladas):
+        - Cantidad entre 1 y 50 → probablemente toneladas (Tn).
+        - Cantidad entre 1.000 y 50.000 → probablemente kilogramos (kg).
+        - Cantidad < 1 o > 100.000 → revisa con atención el albarán.
+
+      Acción: si la unidad declarada no es coherente con la cantidad
+      según la heurística anterior, propón corregir la `unidad`. Si
+      no puedes confirmar cuál es la correcta mirando el PDF (texto
+      borroso, abreviaturas raras), NO cambies nada.
+
+      No cambies la `cantidad` por sentido común: si el albarán dice
+      "31000" eso es lo que pone. Solo se cambia la `unidad`.
+    ejemplo: |
+      Cantidad=31000 con unidad="Toneladas" → IMPOSIBLE: un camión no
+      transporta 31.000 Tn (sería todo el contenido de un buque).
+      Lo correcto es kg.
+        campo: "lineas[0].unidad"
+        descripcion: "Cambiada unidad de 'Toneladas' a 'kg'. Un
+                      camión no puede transportar 31.000 Tn; con
+                      cantidad=31000 lo lógico son kilogramos."
+        patron_aplicado: "unidad_medida_camion"
+
+      Cantidad=3.1 con unidad="kg" → poco probable para un camión
+      (3,1 kg no justifica un viaje). Probablemente Toneladas.
+        campo: "lineas[0].unidad"
+        descripcion: "Cambiada unidad de 'kg' a 'Toneladas'. Un
+                      camión no se desplaza por 3,1 kg de carga;
+                      con cantidad=3.1 lo lógico son toneladas."
+        patron_aplicado: "unidad_medida_camion"
+
+# =====================================================================
+# PLANTILLA PARA NUEVAS REGLAS (copia, descomenta y rellena)
+# =====================================================================
+#
+#  - id: nombre_corto_de_la_regla
+#    titulo: Frase descriptiva de una línea
+#    descripcion: |
+#      Explicación detallada. Di EXPLÍCITAMENTE:
+#        - Qué patrón de error buscar.
+#        - Qué causas habituales lo provocan.
+#        - Qué acción tomar (cambiar qué campo, dejarlo igual, etc.).
+#        - Cuándo NO actuar (ante la duda).
+#    ejemplo: |
+#      Caso real concreto: estado anterior → estado propuesto, con
+#      el patron_aplicado correcto.
+#
+# =====================================================================
+# IDEAS DE REGLAS PARA EL FUTURO (commented-out, descomenta cuando
+# tengas casos en producción que las justifiquen):
+# =====================================================================
+#
+#  - id: cif_formato_espanol
+#    titulo: El CIF/NIF debe respetar el formato español
+#    descripcion: |
+#      Formatos válidos:
+#        - Letra + 8 dígitos      (ej. B12345678)
+#        - 8 dígitos + letra      (ej. 12345678A)
+#        - Letra + 7 dígitos + letra (ej. K1234567B)
+#      Si fase 1 extrajo un CIF que no encaja, mira el PDF: puede
+#      haber confundido 0 con O, 1 con I, 8 con B.
+#
+#  - id: obra_codigo_4_digitos
+#    titulo: El código de obra siempre tiene 4 dígitos empezando por 0
+#    descripcion: |
+#      En Construcciones Ruesma el obra_codigo es 4 dígitos con cero
+#      a la izquierda (ej. "0695", "0721"). Si fase 1 extrajo:
+#        - "695" (3 dígitos) → normaliza a "0695".
+#        - "06952" (5+ dígitos) → probablemente cogió un dígito de
+#          otro campo.
+#        - Códigos con punto (ej. "06.95") → es un código de
+#          imputación, NO el obra_codigo.
+#
+#  - id: coherencia_aritmetica_linea
+#    titulo: cantidad × precio debe coincidir con el importe
+#    descripcion: |
+#      Para cada línea debe cumplirse aproximadamente:
+#        cantidad × precio ≈ importe (tolerancia 1 céntimo).
+#      Si hay descuento:
+#        cantidad × precio × (1 - descuento/100) ≈ importe.
+#      Si la divergencia es mayor, mira el PDF y decide qué campo
+#      está mal (normalmente el `importe` si cantidad y precio se
+#      leen claramente).

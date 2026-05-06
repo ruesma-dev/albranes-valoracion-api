@@ -1,41 +1,43 @@
 # config/settings.py
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Literal
-from urllib.parse import quote_plus
 
-from pydantic import AliasChoices, Field, model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-_ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 
-SharePointMode = Literal["drive_id", "folder_url", "site_path"]
+# Tipo Literal para los proveedores válidos en el routing de fases.
+# Si algún día se añade un nuevo proveedor (p.ej. azure_openai), basta
+# con añadirlo aquí y todo el routing fase 1 / fase 2 lo aceptará sin
+# tocar más sitios.
+ProviderName = Literal["openai", "gemini", "claude"]
 
 
 class Settings(BaseSettings):
-    """Configuración del servicio 5 (valuation-api).
-
-    El servicio llama a la IA con el PDF del contrato como contexto y
-    las líneas de albarán/contrato ya extraídas de BBDD. No persiste:
-    devuelve el envelope con la valoración bruta al llamante.
-
-    Proveedores LLM:
-      - Por defecto SOLO Claude está habilitado (decisión del cliente).
-      - Se mantienen flags de OpenAI/Gemini para poder activarlos sin
-        tocar el código. Si los tres están a false, el boot falla.
-    """
-
     # ------------------------------------------------------------
-    # Flags de proveedores LLM
+    # Flags de habilitación por proveedor LLM.
+    #
+    # El wiring del FastAPI (interface_adapters/api/app.py) lee
+    # ``openai_enabled`` / ``gemini_enabled`` / ``claude_enabled`` y
+    # construye SOLO los clientes de los proveedores habilitados.
+    # Los no habilitados quedan fuera del envelope de extracción — el
+    # merge del servicio 3 ya trata Gemini/Claude como opcionales
+    # (``if envelope.gemini is not None``) así que no rompe nada.
+    #
+    # Las API keys asociadas pasan a ser OPCIONALES: solo se exige la
+    # clave del proveedor si está habilitado. Así puedes tener el .env
+    # sin ``ANTHROPIC_API_KEY`` si ``ENABLE_CLAUDE=false``.
+    #
+    # Validación global: al menos un proveedor debe estar habilitado
+    # (ver ``_ensure_at_least_one_provider_enabled`` más abajo).
     # ------------------------------------------------------------
-    openai_enabled: bool = Field(False, alias="ENABLE_OPENAI")
-    gemini_enabled: bool = Field(False, alias="ENABLE_GEMINI")
+    openai_enabled: bool = Field(True, alias="ENABLE_OPENAI")
+    gemini_enabled: bool = Field(True, alias="ENABLE_GEMINI")
     claude_enabled: bool = Field(True, alias="ENABLE_CLAUDE")
 
     openai_api_key: str | None = Field(None, alias="OPENAI_API_KEY")
     openai_model: str = Field("gpt-5", alias="OPENAI_MODEL")
-
     gemini_api_key: str | None = Field(None, alias="GEMINI_API_KEY")
     gemini_model: str = Field("gemini-2.5-flash", alias="GEMINI_MODEL")
 
@@ -49,91 +51,164 @@ class Settings(BaseSettings):
         alias="ANTHROPIC_MAX_TOKENS",
     )
     anthropic_timeout_s: int = Field(
-        180,
+        120,
         alias="ANTHROPIC_TIMEOUT_S",
     )
 
-    # ------------------------------------------------------------
-    # Política de reintentos para clientes LLM (reutilizada de svc2)
-    # ------------------------------------------------------------
+    google_document_ai_enabled: bool = Field(
+        False,
+        alias="GOOGLE_DOCUMENT_AI_ENABLED",
+    )
+    google_document_ai_project_id: str | None = Field(
+        None,
+        alias="GOOGLE_DOCUMENT_AI_PROJECT_ID",
+    )
+    google_document_ai_location: str = Field(
+        "eu",
+        alias="GOOGLE_DOCUMENT_AI_LOCATION",
+    )
+    google_document_ai_processor_id: str | None = Field(
+        None,
+        alias="GOOGLE_DOCUMENT_AI_PROCESSOR_ID",
+    )
+    google_document_ai_processor_version: str | None = Field(
+        None,
+        alias="GOOGLE_DOCUMENT_AI_PROCESSOR_VERSION",
+    )
+    google_application_credentials: str | None = Field(
+        None,
+        alias="GOOGLE_APPLICATION_CREDENTIALS",
+    )
+
+    azure_document_intelligence_enabled: bool = Field(
+        False,
+        alias="AZURE_DOCUMENT_INTELLIGENCE_ENABLED",
+    )
+    azure_document_intelligence_endpoint: str | None = Field(
+        None,
+        alias="AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT",
+    )
+    azure_document_intelligence_key: str | None = Field(
+        None,
+        alias="AZURE_DOCUMENT_INTELLIGENCE_KEY",
+    )
+    azure_document_intelligence_model_id: str = Field(
+        "prebuilt-invoice",
+        alias="AZURE_DOCUMENT_INTELLIGENCE_MODEL_ID",
+    )
+    azure_document_intelligence_api_version: str = Field(
+        "2024-11-30",
+        alias="AZURE_DOCUMENT_INTELLIGENCE_API_VERSION",
+    )
+    azure_document_intelligence_timeout_s: int = Field(
+        120,
+        alias="AZURE_DOCUMENT_INTELLIGENCE_TIMEOUT_S",
+    )
+
+    # --------------------------------------------------------------
+    # Política de reintentos común para los clientes LLM
+    # (openai / gemini / claude). Ver infrastructure/llm/retry_policy.py
+    # --------------------------------------------------------------
     llm_max_retries: int = Field(2, alias="LLM_MAX_RETRIES")
     llm_backoff_base_s: float = Field(2.0, alias="LLM_BACKOFF_BASE_S")
     llm_backoff_cap_s: float = Field(30.0, alias="LLM_BACKOFF_CAP_S")
 
-    # ------------------------------------------------------------
-    # Prompts y schema
-    # ------------------------------------------------------------
-    prompt_key: str = Field("valuation_es", alias="PROMPT_KEY")
+    # --------------------------------------------------------------
+    # Routing FASE 1 / FASE 2 — refactor de extracción + revisión.
+    #
+    # FASE 1 = extracción "ciega" del PDF.
+    # FASE 2 = revisión del JSON de fase 1 buscando inconsistencias
+    #          (importes negativos, fechas raras, ahorros aritméticos…)
+    #          y proponiendo cambios puntuales.
+    #
+    # Cada fase usa UN proveedor (no es multi-LLM como antes). Lo
+    # decides aquí. El proveedor que elijas para cada fase debe estar
+    # habilitado por el flag correspondiente (ENABLE_OPENAI/...).
+    #
+    # Razones para tener dos proveedores distintos:
+    #   - Diversidad: lo que no ve uno, lo ve el otro.
+    #   - Coste: fase 1 va a un modelo barato (gemini-flash), fase 2
+    #     a uno caro especializado en razonamiento (gpt-5 / claude).
+    # --------------------------------------------------------------
+    ia_primera_fase: ProviderName = Field(
+        "gemini",
+        alias="IA_PRIMERA_FASE",
+    )
+    ia_segunda_fase: ProviderName = Field(
+        "openai",
+        alias="IA_SEGUNDA_FASE",
+    )
+
+    prompt_key_fase1: str = Field(
+        "albaran_factura_es",
+        alias="PROMPT_KEY_FASE1",
+    )
+    prompt_key_fase2: str = Field(
+        "albaran_revision_fase2_es",
+        alias="PROMPT_KEY_FASE2",
+    )
+
+    # Compatibilidad con código antiguo que aún lea "prompt_key" suelto.
+    # Apunta al de fase 1.
+    @property
+    def prompt_key(self) -> str:
+        return self.prompt_key_fase1
+
     prompts_yaml_path: str = Field(
         "config/prompts.yaml",
         alias="PROMPTS_YAML_PATH",
     )
-
-    # ------------------------------------------------------------
-    # BBDD PostgreSQL (solo lectura; compartida con svc 3/6)
-    # ------------------------------------------------------------
-    pg_host: str = Field("localhost", alias="PG_HOST")
-    pg_port: int = Field(5432, alias="PG_PORT")
-    pg_db: str = Field("albaranes", alias="PG_DB")
-    pg_user: str = Field(..., alias="PG_USER")
-    pg_password: str = Field(..., alias="PG_PASSWORD")
-
-    # ------------------------------------------------------------
-    # SharePoint — para descargar el PDF del contrato
-    # ------------------------------------------------------------
-    graph_key: str = Field(..., alias="GRAPH_KEY")
-    sharepoint_mode: SharePointMode = Field(
-        "drive_id",
-        alias="SHAREPOINT_MODE",
+    revision_rules_yaml_path: str = Field(
+        "config/revision_rules.yaml",
+        alias="REVISION_RULES_YAML_PATH",
     )
-    sharepoint_folder_url: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices(
-            "SHAREPOINT_FOLDER_URL",
-            "SHAREPOINT_SHARE_URL",
-        ),
-    )
-    sharepoint_hostname: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices(
-            "SHAREPOINT_HOSTNAME",
-            "SHAREPOINT_HOST",
-        ),
-    )
-    sharepoint_site_path: str | None = Field(
-        default=None,
-        alias="SHAREPOINT_SITE_PATH",
-    )
-    sharepoint_drive_name: str = Field(
-        "Documentos compartidos",
-        alias="SHAREPOINT_DRIVE_NAME",
-    )
-    sharepoint_drive_id: str | None = Field(
-        default=None,
-        alias="SHAREPOINT_DRIVE_ID",
-    )
-
-    # ------------------------------------------------------------
-    # API
-    # ------------------------------------------------------------
     api_host: str = Field("127.0.0.1", alias="API_HOST")
-    api_port: int = Field(8002, alias="API_PORT")
-    http_timeout_s: int = Field(60, alias="HTTP_TIMEOUT_S")
-    max_pdf_mb: int = Field(40, alias="MAX_PDF_MB")
-
+    api_port: int = Field(8000, alias="API_PORT")
+    max_file_mb: int = Field(25, alias="MAX_FILE_MB")
+    cors_allow_origins: str | None = Field(None, alias="CORS_ALLOW_ORIGINS")
     log_level: str = Field("INFO", alias="LOG_LEVEL")
     log_dir: str = Field("logs", alias="LOG_DIR")
     service_version: str = Field("1.0.0", alias="SERVICE_VERSION")
 
-    model_config = SettingsConfigDict(
-        env_file=_ENV_FILE,
-        env_file_encoding="utf-8",
-        extra="ignore",
+    # ------------------------------------------------------------
+    # IA call logging — para tuning de prompts.
+    #
+    # Si IA_LOGGING_ENABLED=true, cada llamada a Gemini/OpenAI/Claude
+    # genera un par de archivos JSON (request + response) en
+    # ``IA_LOGGING_DIR`` particionado por día:
+    #
+    #   <IA_LOGGING_DIR>/<YYYYMMDD>/<HHMMSS_milis>_<provider>_<id>.json
+    #
+    # No incluye bytes binarios del PDF (solo metadatos + sha256).
+    # No incluye claves API.
+    #
+    # Sin retención automática: se conserva todo el histórico.
+    # ------------------------------------------------------------
+    ia_logging_enabled: bool = Field(
+        False,
+        alias="IA_LOGGING_ENABLED",
+    )
+    ia_logging_dir: str = Field(
+        "logs/ia",
+        alias="IA_LOGGING_DIR",
     )
 
-    # ------------------------------------------------------------
-    # Validaciones cruzadas
-    # ------------------------------------------------------------
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    # --------------------------------------------------------------
+    # Validaciones cruzadas.
+    #
+    # 1) Al menos un proveedor LLM debe estar habilitado — si los tres
+    #    están a false, el servicio no puede extraer nada y el boot
+    #    falla con un mensaje explícito en lugar de descubrirlo en
+    #    runtime tras procesar un PDF.
+    # 2) Si un proveedor está habilitado, su API key debe existir.
+    #    Evita arrancar con ENABLE_OPENAI=true y OPENAI_API_KEY vacío,
+    #    que causaría un 401 en la primera extracción.
+    # 3) Los proveedores escogidos para fase 1 / fase 2 deben estar
+    #    habilitados. Si no, salta error en boot en lugar de en
+    #    runtime con un KeyError críptico.
+    # --------------------------------------------------------------
     @model_validator(mode="after")
     def _ensure_at_least_one_provider_enabled(self) -> "Settings":
         enabled = {
@@ -144,7 +219,8 @@ class Settings(BaseSettings):
         if not any(enabled.values()):
             raise ValueError(
                 "Al menos un proveedor LLM debe estar habilitado. "
-                "Revisa ENABLE_OPENAI / ENABLE_GEMINI / ENABLE_CLAUDE."
+                "Revisa ENABLE_OPENAI / ENABLE_GEMINI / ENABLE_CLAUDE "
+                "en el .env — actualmente los tres están a false."
             )
         return self
 
@@ -159,22 +235,48 @@ class Settings(BaseSettings):
             missing.append("ANTHROPIC_API_KEY (ENABLE_CLAUDE=true)")
         if missing:
             raise ValueError(
-                "Faltan API keys: " + ", ".join(missing)
+                "Faltan API keys para los proveedores habilitados: "
+                + ", ".join(missing)
+                + ". Si no quieres usar un proveedor, pon su flag a "
+                "false (p.e. ENABLE_CLAUDE=false) en lugar de dejar "
+                "la clave vacía."
             )
         return self
 
-    @property
-    def database_url(self) -> str:
-        user = quote_plus(self.pg_user)
-        password = quote_plus(self.pg_password)
-        database = quote_plus(self.pg_db)
-        return (
-            f"postgresql+psycopg://{user}:{password}"
-            f"@{self.pg_host}:{self.pg_port}/{database}"
-        )
+    @model_validator(mode="after")
+    def _ensure_phase_providers_enabled(self) -> "Settings":
+        flag_by_provider = {
+            "openai": self.openai_enabled,
+            "gemini": self.gemini_enabled,
+            "claude": self.claude_enabled,
+        }
+        problems: list[str] = []
+        if not flag_by_provider.get(self.ia_primera_fase, False):
+            problems.append(
+                f"IA_PRIMERA_FASE='{self.ia_primera_fase}' pero "
+                f"ENABLE_{self.ia_primera_fase.upper()} no está a true"
+            )
+        if not flag_by_provider.get(self.ia_segunda_fase, False):
+            problems.append(
+                f"IA_SEGUNDA_FASE='{self.ia_segunda_fase}' pero "
+                f"ENABLE_{self.ia_segunda_fase.upper()} no está a true"
+            )
+        if problems:
+            raise ValueError(
+                "Hay proveedores asignados a fases que no están "
+                "habilitados: " + "; ".join(problems) + ". "
+                "Habilita el proveedor o cambia la fase a otro."
+            )
+        return self
 
+    # Helpers de conveniencia para el wiring.
     @property
     def enabled_llm_providers(self) -> list[str]:
+        """Lista ordenada de proveedores LLM habilitados.
+
+        Útil para logs y para el endpoint /health. El orden es el
+        canónico del sistema: openai → gemini → claude.
+        """
         out: list[str] = []
         if self.openai_enabled:
             out.append("openai")
