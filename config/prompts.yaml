@@ -283,6 +283,13 @@ valuation_es:
         (precio_unitario_pdf_inferido) si lo dedujiste, o null (Forma C,
         a revision). NUNCA inventes un match.
 
+    AVISO CRITICO (causa frecuente de error 400): matched_contrato_line_id
+    NO es lo mismo que merge_line_id. matched_contrato_line_id es el id de
+    una linea de la TABLA DEL CONTRATO. merge_line_id es el id de una linea
+    del ALBARAN. En una sintetica, merge_line_id DEBE ser null SIEMPRE,
+    aunque le pongas matched_contrato_line_id. No copies el id del contrato
+    en merge_line_id ni al reves.
+
     Equivalencias semanticas (orientativas, NO exhaustivas):
       - 'carga incompleta' ~ 'Cargas incompletas (pedidos inferiores a
         6 m3)' (singular/plural y parentesis: da igual).
@@ -303,7 +310,8 @@ valuation_es:
     Campos obligatorios en cada línea sintética:
 
     - line_kind = "synthetic_modifier"
-    - merge_line_id = null
+    - merge_line_id = null  (SIEMPRE null en sintéticas, aunque pongas
+      matched_contrato_line_id; ver AVISO CRITICO arriba)
     - parent_merge_line_id = merge_line_id de la línea base
     - modifier_source: uno de 'codigo_producto' | 'observaciones' |
       'year_contract' | 'year_albaran' | 'tiempo_exceso' |
