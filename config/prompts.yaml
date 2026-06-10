@@ -98,6 +98,10 @@ valuation_es:
     (partida alzada, PA) SOLO case con "lump_sum". Si no hay
     candidatos con categoría compatible, unit_category_match=false y
     `matched_contrato_line_id=null`, `match_method="no_match"`.
+    Esta regla de categoría PREVALECE sobre el match por familia del
+    Paso 2: aunque parezca la misma familia, NUNCA cases entre
+    categorías incompatibles (p.e. unidades/peso/volumen contra
+    €/mes, €/PA o partida alzada).
 
     ### Paso 2 — FASE 1A — Matching por descripción contra la TABLA
 
@@ -111,8 +115,48 @@ valuation_es:
     - **exact_concept**: descripción idéntica o muy similar (>90%)
       tras normalizar abreviaturas típicas.
     - **semantic**: mismo producto, diferente redacción.
-    - **no_match**: no hay candidato razonable (DEVUELVE NULL en
-      matched_contrato_line_id). NO fuerces un match si dudas.
+    - **semantic por FAMILIA (variante/talla no tarifada)**: el contrato
+      NO tiene la variante exacta del albarán (una talla, medida o
+      especificación concreta) pero SÍ tiene claramente el MISMO
+      producto/familia en otra variante. En ese caso NO devuelvas
+      no_match: casa con la línea HERMANA más próxima de la misma
+      familia (la de medida/especificación más cercana),
+      match_method="semantic" y confianza BAJA (<=50). Pon en
+      `precio_unitario_contrato_db` el precio de esa hermana como
+      REFERENCIA (NO es el precio exacto de la variante del albarán;
+      el revisor humano lo ajustará) e indica en `razon_corta` que es
+      match por familia con variante no tarifada (p.e. "familia REJILLAS
+      VENTILACION; talla 2300x500 no tarifada, referencia 50x20"). Casar
+      con un hermano REAL de la misma familia NO es inventarse un match:
+      es preferible dar la partida y un precio orientativo a dejar la
+      línea sin casar. Trae la referencia aunque la medida difiera.
+      PERO el match por familia NO vale a cualquier coste: SOLO es
+      válido si el candidato cumple las DOS condiciones siguientes;
+      si falla cualquiera, devuelve no_match:
+        (a) MISMA categoría de unidad. Un material medido por
+            unidades/peso/volumen/longitud/área (count/mass/volume/
+            length/area) NUNCA casa con una línea a tanto alzado
+            (lump_sum, "partida alzada", PA) ni de tiempo (€/mes,
+            €/día). Distinta categoría = NO es la misma familia
+            operativa.
+        (b) Precio de referencia del MISMO ORDEN DE MAGNITUD que el
+            precio unitario o el importe-por-unidad del albarán. Si el
+            candidato cuesta órdenes de magnitud más/menos, NO es la
+            misma familia operativa.
+      Ejemplo de lo que NO debe casar: albarán "IMPULSORES DESA" a
+      0,65 €/ud (categoría count) frente a una línea de contrato
+      "MATERIAL DE FERRETERIA" a 3.000 €/mes (lump_sum/tiempo): aunque
+      compartan el código de partida, la categoría y el precio son
+      incompatibles -> no_match. COINCIDIR SOLO EL CÓDIGO DE PARTIDA
+      NUNCA basta para casar.
+    - **no_match**: cuando NO hay ningún producto de la misma familia
+      en el contrato (algo realmente ajeno), o cuando el único
+      candidato "de la familia" tiene categoría de unidad incompatible
+      o un precio de orden de magnitud distinto (ver condiciones (a) y
+      (b) de arriba). DEVUELVE NULL en matched_contrato_line_id. Si la
+      familia sí coincide, la categoría es compatible y solo cambia la
+      variante/talla, usa el match por familia de arriba, NUNCA
+      no_match.
 
     Si el contrato tiene VARIAS líneas con la misma descripción
     (mismo producto en distintas partidas), devuelve el id de una
@@ -251,7 +295,8 @@ valuation_es:
     - 50-74: solo una de las dos fases da resultado, o línea
       complementaria con tarifa clara en PDF.
     - 30-49: hay dudas (modificadores parcialmente tarifados, tarifa
-      de complementario encontrada pero en sección poco clara, etc.).
+      de complementario encontrada pero en sección poco clara, match
+      por FAMILIA con variante/talla no tarifada, etc.).
     - menor a 30: hay dudas serias (no_match, sin tarifa en ningún
       lado).
 

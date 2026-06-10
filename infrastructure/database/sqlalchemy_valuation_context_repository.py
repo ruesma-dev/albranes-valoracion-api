@@ -96,6 +96,7 @@ _SQL_ALBARAN_LINES = text(
 _SQL_CONTRATO_HEADER = text(
     """
     SELECT
+        id,
         codigo_contrato,
         nombre_contrato,
         cif_proveedor,
@@ -105,8 +106,8 @@ _SQL_CONTRATO_HEADER = text(
         pdf_sharepoint_relative_path,
         pdf_sharepoint_web_url
     FROM albaran_contratos_merge
-    WHERE document_id = :document_id
-      AND codigo_contrato = :codigo_contrato
+    WHERE codigo_contrato = :codigo_contrato
+    ORDER BY id DESC
     LIMIT 1
     """
 )
@@ -122,10 +123,7 @@ _SQL_CONTRATO_LINES = text(
         cl.precio_unitario   AS precio_unitario,
         cl.codigo_partida    AS codigo_partida
     FROM albaran_contrato_lines_merge cl
-    JOIN albaran_contratos_merge ch
-      ON ch.id = cl.contrato_id
-    WHERE ch.document_id = :document_id
-      AND ch.codigo_contrato = :codigo_contrato
+    WHERE cl.contrato_id = :contrato_id
     ORDER BY cl.linea NULLS LAST, cl.id
     """
 )
@@ -179,12 +177,13 @@ class SqlAlchemyValuationContextRepository(ValuationContextRepository):
                     lineas_contrato=[],
                 )
 
+            # La cabecera del contrato se busca por CODIGO (no por
+            # document_id): es unica por sigrid_ide y su document_id es el
+            # del ultimo albaran enriquecido, asi que los albaranes que
+            # COMPARTEN contrato no la encontraban por document_id.
             contrato_row = session.execute(
                 _SQL_CONTRATO_HEADER,
-                {
-                    "document_id": document_id,
-                    "codigo_contrato": codigo_contrato,
-                },
+                {"codigo_contrato": codigo_contrato},
             ).mappings().first()
 
             if contrato_row is None:
@@ -193,12 +192,11 @@ class SqlAlchemyValuationContextRepository(ValuationContextRepository):
                     f"codigo_contrato={codigo_contrato}"
                 )
 
+            # Las lineas se atan al id de ESA cabecera (contrato_id), no al
+            # document_id, para que coincidan con la cabecera elegida.
             contrato_lines_rows = session.execute(
                 _SQL_CONTRATO_LINES,
-                {
-                    "document_id": document_id,
-                    "codigo_contrato": codigo_contrato,
-                },
+                {"contrato_id": contrato_row["id"]},
             ).mappings().all()
 
             lineas_contrato = [
