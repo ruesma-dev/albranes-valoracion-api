@@ -58,13 +58,17 @@ _SQL_MERGE_HEADER = text(
 # de ``albaran_lines_merge``. Viajan por el envelope hasta el svc6
 # donde se usan para calcular el importe valorado con descuento.
 #
-# NOTA sobre el alias existente ``precio_neto AS importe_albaran``:
-# Este alias viene de ANTES de la tanda descuento. Lo que el svc5
-# llamaba "importe_albaran" era en realidad el precio_neto unitario
-# de la línea (no el importe total = cantidad × precio). Esto no
-# cambia: el alias se mantiene tal cual para no romper aguas abajo.
-# Los campos NUEVOS (descuento_albaran, precio_neto_albaran) se
-# leen con alias propios y explícitos.
+# NOTA (corregida jun 2026) sobre ``importe_albaran``:
+# Históricamente el SELECT hacía ``precio_neto AS importe_albaran``,
+# es decir, lo que el svc5 llamaba "importe_albaran" era en realidad
+# el precio_neto UNITARIO de la línea (no el importe total). Eso era
+# un BUG: el ImporteCalculator del svc6 usa ``importe_albaran`` como
+# IMPORTE TOTAL declarado de la línea (su fallback cuando no hay
+# cantidad convertida, y su contraste con el calculado). Con el alias
+# antiguo, la línea base de hormigón aparecía con importe 0/vacío.
+# Ahora el SELECT calcula el importe total real = cantidad × precio_neto.
+# Si cualquiera de los dos es NULL, el importe sale NULL y el svc6
+# recae en el cálculo por precio×cantidad (comportamiento correcto).
 #
 # Compatibilidad: para albaranes sin columna descuento (anteriores
 # al fix de svc3), la columna viene NULL → descuento=None en el
@@ -81,7 +85,17 @@ _SQL_ALBARAN_LINES = text(
         unidad_medida       AS unidad_medida,
         cantidad            AS cantidad,
         precio              AS precio_unitario_albaran,
-        precio_neto         AS importe_albaran,
+        -- FIX (jun 2026): importe_albaran es el IMPORTE TOTAL de la
+        -- línea, no un precio unitario. En albaran_lines_merge NO existe
+        -- columna de importe: solo precio (unitario bruto), descuento y
+        -- precio_neto (unitario NETO). El importe real de la línea es
+        -- cantidad × precio_neto. Antes se mapeaba 'precio_neto AS
+        -- importe_albaran', metiendo un precio UNITARIO donde el
+        -- ImporteCalculator espera el importe TOTAL: cuando la línea
+        -- base de hormigón no producía cantidad_convertida, el importe
+        -- caía a ese unitario (o a 0/NULL si precio_neto venía vacío),
+        -- y la fila aparecía con importe 0/vacío en el portal.
+        (cantidad * precio_neto) AS importe_albaran,
         codigo_imputacion   AS codigo_partida_albaran,
         contexto_linea_json AS contexto_linea_json,
         descuento           AS descuento_albaran,
