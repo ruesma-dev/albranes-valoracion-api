@@ -86,6 +86,7 @@ class RawContratoHeader:
     nombre_obra: Optional[str]
     pdf_relative_path: Optional[str]
     pdf_web_url: Optional[str]
+    md_relative_path: Optional[str] = None
 
 
 @dataclass(frozen=True)

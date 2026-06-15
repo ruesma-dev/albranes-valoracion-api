@@ -118,7 +118,8 @@ _SQL_CONTRATO_HEADER = text(
         codigo_obra,
         nombre_obra,
         pdf_sharepoint_relative_path,
-        pdf_sharepoint_web_url
+        pdf_sharepoint_web_url,
+        md_sharepoint_relative_path
     FROM albaran_contratos_merge
     WHERE codigo_contrato = :codigo_contrato
     ORDER BY id DESC
@@ -266,6 +267,7 @@ class SqlAlchemyValuationContextRepository(ValuationContextRepository):
             nombre_obra=_opt_str(row.get("nombre_obra")),
             pdf_relative_path=_opt_str(row.get("pdf_sharepoint_relative_path")),
             pdf_web_url=_opt_str(row.get("pdf_sharepoint_web_url")),
+            md_relative_path=_opt_str(row.get("md_sharepoint_relative_path")),
         )
 
 

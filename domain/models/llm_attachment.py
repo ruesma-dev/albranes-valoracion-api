@@ -1,15 +1,10 @@
 # domain/models/llm_attachment.py
-from __future__ import annotations
+"""Reexport — la implementación canónica vive en ruesma-albaranes-comun.
 
-from dataclasses import dataclass
-from typing import Literal
+Este módulo se conserva como reexport para que TODOS los imports del
+servicio sigan funcionando sin tocar más ficheros, eliminando a la vez
+la copia local divergente. Requiere: pip install -e ../comun
+"""
+from ruesma_comun.llm.llm_attachment import LlmAttachment
 
-AttachmentKind = Literal["image", "pdf"]
-
-
-@dataclass(frozen=True)
-class LlmAttachment:
-    kind: AttachmentKind
-    filename: str
-    mime_type: str
-    data: bytes
+__all__ = ["LlmAttachment"]

@@ -150,25 +150,43 @@ class ValueAlbaranPipeline:
             lineas_contrato=lineas_contrato,
         )
 
-        pdf_attachment = self._try_download_pdf(contrato_header.pdf_relative_path)
-        if pdf_attachment is not None:
-            context = ContextoValoracion(
-                document_id=context.document_id,
-                codigo_contrato=context.codigo_contrato,
-                nombre_contrato=context.nombre_contrato,
-                cif_proveedor=context.cif_proveedor,
-                nombre_proveedor=context.nombre_proveedor,
-                codigo_obra=context.codigo_obra,
-                nombre_obra=context.nombre_obra,
-                pdf_relative_path=context.pdf_relative_path,
-                pdf_filename=pdf_attachment.filename,
-                lineas_albaran=context.lineas_albaran,
-                lineas_contrato=context.lineas_contrato,
+        # Preferimos el MARKDOWN del contrato (lo genera sv3): va al
+        # user_text en texto puro, sin adjuntar el PDF. Si no hay MD,
+        # mantenemos el comportamiento anterior (PDF como adjunto).
+        contrato_markdown: str | None = None
+        pdf_attachment: LlmAttachment | None = None
+        md_rel = getattr(contrato_header, "md_relative_path", None)
+        if md_rel:
+            contrato_markdown = self._try_download_md(md_rel)
+
+        if contrato_markdown:
+            logger.info(
+                "[pipeline] contrato -> MD (%s chars); no se adjunta PDF.",
+                len(contrato_markdown),
             )
+        else:
+            pdf_attachment = self._try_download_pdf(
+                contrato_header.pdf_relative_path
+            )
+            if pdf_attachment is not None:
+                context = ContextoValoracion(
+                    document_id=context.document_id,
+                    codigo_contrato=context.codigo_contrato,
+                    nombre_contrato=context.nombre_contrato,
+                    cif_proveedor=context.cif_proveedor,
+                    nombre_proveedor=context.nombre_proveedor,
+                    codigo_obra=context.codigo_obra,
+                    nombre_obra=context.nombre_obra,
+                    pdf_relative_path=context.pdf_relative_path,
+                    pdf_filename=pdf_attachment.filename,
+                    lineas_albaran=context.lineas_albaran,
+                    lineas_contrato=context.lineas_contrato,
+                )
 
         results = self._service.extract(
             context=context,
             pdf_attachment=pdf_attachment,
+            contrato_markdown=contrato_markdown,
         )
 
         return self._build_envelope(
@@ -176,6 +194,24 @@ class ValueAlbaranPipeline:
             results=results,
             pdf_attachment=pdf_attachment,
         )
+
+    def _try_download_md(self, relative_path: str | None) -> str | None:
+        """Descarga el Markdown del contrato (texto) o None si falla/no hay."""
+        if not relative_path:
+            return None
+        try:
+            md = self._pdf_downloader.download_markdown_by_relative_path(
+                relative_path=relative_path,
+            )
+        except Exception:
+            logger.exception(
+                "[pipeline] fallo descargando MD contrato path=%s; "
+                "se intentará el PDF.",
+                relative_path,
+            )
+            return None
+        md = (md or "").strip()
+        return md or None
 
     def _try_download_pdf(
         self,

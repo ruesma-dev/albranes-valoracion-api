@@ -96,6 +96,13 @@ def build_app(settings: Settings) -> FastAPI:
                     timeout_s=settings.anthropic_timeout_s,
                     retry_policy=retry_policy,
                     call_logger=call_logger,
+                    # El cliente canónico (ruesma-albaranes-comun) es
+                    # compartido con sv2: cada servicio fija su tool.
+                    tool_name="emit_valuation_result",
+                    tool_description=(
+                        "Devuelve la valoración estructurada de las líneas del albarán "
+                        "conforme al esquema exigido. Llama SIEMPRE y SOLO a esta herramienta."
+                    ),
                 ),
             )
         )

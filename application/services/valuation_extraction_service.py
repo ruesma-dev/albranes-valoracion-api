@@ -191,6 +191,7 @@ class ValuationExtractionService:
         *,
         context: ContextoValoracion,
         pdf_attachment: Optional[LlmAttachment],
+        contrato_markdown: Optional[str] = None,
     ) -> Dict[str, ProviderValuationResult]:
         spec = self._prompts.get(self._prompt_key)
         response_model: Type[BaseModel] = self._schemas.get(spec.schema)
@@ -200,12 +201,23 @@ class ValuationExtractionService:
             context=context,
         )
 
-        # Si NO hay PDF, añadimos al user_text las instrucciones
-        # explícitas para hacer solo fase 1a, y dejamos el attachment
-        # como None para que los clientes LLM no manden bloque de
-        # documento. Ya NO se inventa un PDF dummy.
-        if pdf_attachment is None:
+        # Cómo entra el contrato al LLM (preferimos el Markdown que genera sv3):
+        #   - MD disponible  -> al user_text en texto puro, SIN adjunto.
+        #   - PDF disponible -> como adjunto (comportamiento anterior).
+        #   - ninguno        -> nota _NOTA_SIN_PDF (solo fase 1a), sin adjunto.
+        if contrato_markdown:
+            user_text = (
+                user_text + "\n\n## CONTRATO (markdown)\n\n" + contrato_markdown
+            )
+            pdf_attachment = None
+            _contrato_modo = f"MD ({len(contrato_markdown)} chars)"
+        elif pdf_attachment is not None:
+            _contrato_modo = "PDF"
+        else:
             user_text = user_text + _NOTA_SIN_PDF
+            _contrato_modo = "ninguno (fase 1a)"
+
+        logger.info("[extract] contrato -> %s", _contrato_modo)
 
         results: Dict[str, ProviderValuationResult] = {}
         for provider_spec in self._providers:
