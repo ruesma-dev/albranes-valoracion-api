@@ -191,6 +191,18 @@ class LineValuation(StrictSchemaModel):
             "el precio inferido."
         ),
     )
+    contenedor_m3: Optional[float] = Field(
+        default=None,
+        description=(
+            "SOLO residuos (contexto_linea.tipo_familia='residuos'): m³ "
+            "por contenedor del contrato para la línea de CONTENEDOR que "
+            "ELIGES. Regla: si el contrato tiene un contenedor cuyo tamaño "
+            "coincide con los m³ del albarán, usa ese; si no, el contenedor "
+            "por defecto del contrato. Otro servicio calcula "
+            "num_contenedores = ceil(volumen_m3 / contenedor_m3). Null si "
+            "no es residuos o no hay contenedor en el contrato."
+        ),
+    )
     razon_corta: str = Field(
         description=(
             "Explicación corta del matching hecho, en español, para "

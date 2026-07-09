@@ -47,6 +47,10 @@ valuation_es:
     en el task. Cada línea sintética lleva line_kind='synthetic_modifier'
     y parent_merge_line_id apuntando a la base.
 
+    Para familia 'residuos' NO se emiten sintéticas: se casa la línea
+    con la de CONTENEDOR del contrato y otro servicio calcula el nº de
+    contenedores y el importe. Ver Caso (d) del task.
+
     Reglas estrictas:
 
     - NUNCA inventes precios ni ids. Si no lo tienes claro, null.
@@ -87,6 +91,49 @@ valuation_es:
       línea complementaria, usa procedimiento COMPLEMENTARIO (paso 5).
       Ten en cuenta también la línea base referenciada por
       `ref_linea_base` para contexto.
+    - **Caso (d) — RESIDUOS**: tipo_familia == 'residuos' (documento de
+      gestión de RCD; la línea trae `codigo_ler` y normalmente
+      `volumen_m3` y/o `peso_toneladas`). La valoración va POR
+      CONTENEDOR. Estas reglas TIENEN PRIORIDAD sobre los pasos
+      generales (incluido el filtro de categoría del Paso 1):
+        1. **La categoría de unidad NO bloquea en residuos.** El albarán
+           viene en m³ y las líneas de contenedor del contrato en
+           ud/contenedor: esa diferencia es ESPERADA (otro servicio
+           convierte m³ → nº de contenedores). NO descartes el match por
+           unidad_category_match=false.
+        2. **El precio NO bloquea en residuos.** Que la línea de
+           contrato tenga precio 0, o que el albarán no traiga precio, NO
+           es motivo para descartar el match. Casa por DESCRIPCIÓN +
+           PARTIDA.
+        3. **Elige la línea de contenedor por TIPO de residuo + PARTIDA.**
+           El contrato suele tener varias "MOVIMIENTO DE CONTENEDOR DE
+           X M CÚBICOS <TIPO>" (HORMIGÓN, LADRILLO, MADERA, MEZCLA OTROS
+           RESIDUOS, PAPEL/CARTÓN, RCD, TIERRAS…), todas de la misma
+           partida (p.ej. 32.01). Casa con la del <TIPO> que corresponda
+           al residuo del albarán (por el LER / la descripción). Si no
+           hay un <TIPO> exacto, usa "MEZCLA OTROS RESIDUOS" o la más
+           genérica de esa partida.
+        4. Pon matched_contrato_line_id = esa línea, precio_unitario_
+           contrato_db = su precio POR contenedor, y RELLENA
+           `contenedor_m3` = los m³ de ESE contenedor (de su descripción,
+           p.ej. "6 M CÚBICOS" → 6). Si el albarán trae m³ igual a un
+           tamaño concreto, prioriza ese tamaño; si no, el por defecto.
+        5. **Caso SIN m³/Tn (solo "movimiento"):** si el albarán solo
+           indica un movimiento de contenedor SIN volumen ni peso, NO
+           uses las líneas "6 M CÚBICOS": casa con la línea genérica
+           "MOVIMIENTO DE CONTENEDORES DE RESIDUOS" (tarifa por
+           movimiento) de la partida que corresponda, y deja
+           `contenedor_m3` = null (no hay ceil; la cantidad es el nº de
+           movimientos, normalmente 1).
+        6. NO calcules el número de contenedores ni el importe (lo hace
+           otro servicio: num_contenedores = ceil(volumen_m3 /
+           contenedor_m3)). NO emitas líneas sintéticas para residuos.
+        7. En razon_corta anota el LER, los m3/Tn y qué línea de contrato
+           elegiste y por qué (p.ej. "LER 170101 Hormigón, 8 m3 →
+           'CONTENEDOR 6 M CÚBICOS HORMIGÓN' (mismo tipo+partida), 138
+           €/contenedor").
+      Si el contrato no tiene ninguna línea de contenedor, casa lo mejor
+      posible, deja contenedor_m3 null y explícalo (irá a revisión).
 
     ### Paso 1 — Filtro inicial por categoría de unidad
 
