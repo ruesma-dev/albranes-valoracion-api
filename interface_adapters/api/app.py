@@ -11,6 +11,7 @@ from application.pipelines.value_albaran_pipeline import (
     ValueAlbaranPipeline,
     ValueAlbaranRequest,
 )
+from application.services.conciliacion_service import ConciliacionService
 from application.services.schema_registry import SchemaRegistry
 from application.services.unit_category_prefilter import UnitCategoryPrefilter
 from application.services.valuation_extraction_service import (
@@ -42,6 +43,30 @@ logger = logging.getLogger(__name__)
 class ValueRequestBody(BaseModel):
     document_id: str
     codigo_contrato: str | None = None
+
+
+class ConciliarLineaEntrada(BaseModel):
+    line_ref: int
+    descripcion: str
+    unidad_medida: str | None = None
+    cantidad: float | None = None
+    codigo_partida: str | None = None
+    precio_albaran: float | None = None
+
+
+class ConciliarLineaContrato(BaseModel):
+    id: int
+    descripcion: str
+    unidad_medida: str | None = None
+    precio_unitario: float | None = None
+    codigo_partida: str | None = None
+
+
+class ConciliarRequestBody(BaseModel):
+    document_id: str
+    lineas_no_casadas: list[ConciliarLineaEntrada] = []
+    lineas_contrato: list[ConciliarLineaContrato] = []
+
 
 
 def build_app(settings: Settings) -> FastAPI:
@@ -136,13 +161,29 @@ def build_app(settings: Settings) -> FastAPI:
         prompt_repo=prompt_repo,
         schema_registry=schema_registry,
         prompt_key=settings.prompt_key,
+        ia3_provider=settings.ia3_provider,
     )
+    # IA4: proveedor dedicado si se configura (IA4_PROVIDER); si no, el
+    # primero habilitado. ConciliacionService usa providers[0] del que
+    # le pasemos, asi que filtramos la lista al elegido.
+    _ia4_sel = (settings.ia4_provider or "").strip().lower()
+    _ia4_providers = (
+        [p for p in providers if p.provider == _ia4_sel] or providers
+    )
+    conciliacion_service = ConciliacionService(
+        providers=_ia4_providers,
+        prompt_repo=prompt_repo,
+        schema_registry=schema_registry,
+        prompt_key=settings.ia4_prompt_key,
+    )
+
     pipeline = ValueAlbaranPipeline(
         context_repository=context_repository,
         pdf_downloader=pdf_downloader,
         prefilter=UnitCategoryPrefilter(),
         extraction_service=extraction_service,
         max_pdf_mb=settings.max_pdf_mb,
+        ia3_provider=settings.ia3_provider,
         service_version=settings.service_version,
     )
 
@@ -175,8 +216,17 @@ def build_app(settings: Settings) -> FastAPI:
                 )
             )
         except KeyError as exc:
+            logger.warning(
+                "[value] 404 document_id=%s: %s", body.document_id, exc
+            )
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
+            logger.warning(
+                "[value] 400 document_id=%s (posible ValidationError del "
+                "LLM contra DocumentoValoracion): %s",
+                body.document_id,
+                exc,
+            )
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
             logger.exception(
@@ -186,6 +236,27 @@ def build_app(settings: Settings) -> FastAPI:
             raise HTTPException(
                 status_code=500,
                 detail=f"Error valorando albarán: {exc}",
+            ) from exc
+
+    @app.post("/v1/albaranes/conciliar")
+    def conciliar(body: ConciliarRequestBody) -> Dict[str, Any]:
+        try:
+            result = conciliacion_service.conciliar(
+                lineas_no_casadas=[
+                    l.model_dump() for l in body.lineas_no_casadas
+                ],
+                lineas_contrato=[
+                    l.model_dump() for l in body.lineas_contrato
+                ],
+            )
+            return result.model_dump()
+        except Exception as exc:
+            logger.exception(
+                "Error conciliando document_id=%s", body.document_id
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error conciliando: {exc}",
             ) from exc
 
     # ----------------------------------------------------------- #

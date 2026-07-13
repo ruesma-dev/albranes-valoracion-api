@@ -55,3 +55,7 @@ class YamlPromptRepository(PromptRepository):
                 f"Disponibles: {available}"
             )
         return self._specs[prompt_key]
+
+    def has(self, prompt_key: str) -> bool:
+        """True si el prompt esta cargado (seleccion por tipologia)."""
+        return prompt_key in self._specs

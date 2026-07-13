@@ -217,6 +217,25 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------
+    # IA4 (conciliacion semantica en lote). Se lanza en sv6 solo
+    # para lineas que el determinista NO caso. Aqui se elige QUE
+    # proveedor la ejecuta y con que prompt.
+    #   - IA4_PROVIDER: 'openai' | 'gemini' | 'claude'. Si vacio, usa
+    #     el primer proveedor habilitado (mismo que la valoracion).
+    #   - IA4_PROMPT_KEY: prompt de conciliacion (por defecto
+    #     'conciliacion_es').
+    # ------------------------------------------------------------
+    # IA3 (valoracion). Si se fija, SOLO ese proveedor valora (una llamada).
+    # Si esta vacio, se mantiene el comportamiento historico: se llama a
+    # TODOS los proveedores habilitados y manda claude > gemini > openai.
+    ia3_provider: str | None = Field(None, alias="IA3_PROVIDER")
+    ia4_provider: str | None = Field(None, alias="IA4_PROVIDER")
+    ia4_prompt_key: str = Field(
+        "conciliacion_es",
+        alias="IA4_PROMPT_KEY",
+    )
+
+    # ------------------------------------------------------------
     # API y logging.
     # ------------------------------------------------------------
     api_host: str = Field("127.0.0.1", alias="API_HOST")

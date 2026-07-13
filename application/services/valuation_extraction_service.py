@@ -131,11 +131,13 @@ class ValuationExtractionService:
         prompt_repo: PromptRepository,
         schema_registry: SchemaRegistry,
         prompt_key: str,
+        ia3_provider: str | None = None,
     ) -> None:
         self._providers = list(providers)
         self._prompts = prompt_repo
         self._schemas = schema_registry
         self._prompt_key = prompt_key
+        self._ia3_provider = ia3_provider
 
     @staticmethod
     def _attachment_debug(
@@ -193,7 +195,13 @@ class ValuationExtractionService:
         pdf_attachment: Optional[LlmAttachment],
         contrato_markdown: Optional[str] = None,
     ) -> Dict[str, ProviderValuationResult]:
-        spec = self._prompts.get(self._prompt_key)
+        # Prompt de valoracion por TIPOLOGIA si existe; si no, el generico.
+        prompt_key = self._prompt_key
+        _tipologia = _derivar_tipologia_valoracion(context)
+        _candidato = f"valuation_{_tipologia}"
+        if self._prompts.has(_candidato):
+            prompt_key = _candidato
+        spec = self._prompts.get(prompt_key)
         response_model: Type[BaseModel] = self._schemas.get(spec.schema)
         user_text = self._build_user_text(
             spec_task=spec.task,
@@ -220,12 +228,19 @@ class ValuationExtractionService:
         logger.info("[extract] contrato -> %s", _contrato_modo)
 
         results: Dict[str, ProviderValuationResult] = {}
-        for provider_spec in self._providers:
+        # IA3_PROVIDER: si se configura, SOLO valora ese proveedor.
+        # Sin el, se llamaba a TODOS los habilitados (coste x2 con dos
+        # proveedores activos) y mandaba claude por orden fijo.
+        _sel = (self._ia3_provider or "").strip().lower()
+        _providers = [
+            p for p in self._providers if p.provider == _sel
+        ] or self._providers
+        for provider_spec in _providers:
             logger.info(
                 "Valoración albarán proveedor=%s prompt_key=%s model=%s "
                 "document_id=%s lineas_albaran=%s lineas_contrato=%s pdf=%s",
                 provider_spec.provider,
-                self._prompt_key,
+                prompt_key,
                 provider_spec.model_name,
                 context.document_id,
                 len(context.lineas_albaran),
@@ -233,6 +248,7 @@ class ValuationExtractionService:
                 "yes" if pdf_attachment is not None else "no",
             )
             results[provider_spec.provider] = self._extract_with_provider(
+                prompt_key=prompt_key,
                 spec_system=spec.system,
                 user_text=user_text,
                 attachment=pdf_attachment,
@@ -245,6 +261,7 @@ class ValuationExtractionService:
     def _extract_with_provider(
         self,
         *,
+        prompt_key: str,
         spec_system: str,
         user_text: str,
         attachment: Optional[LlmAttachment],
@@ -283,7 +300,28 @@ class ValuationExtractionService:
             provider=provider_spec.provider,
             model_name=provider_spec.model_name,
             schema_name=schema_name,
-            prompt_key=self._prompt_key,
+            prompt_key=prompt_key,
             parsed=parsed,
             debug_payload=debug_payload,
         )
+
+
+def _derivar_tipologia_valoracion(context) -> str:
+    """Tipologia del albaran para elegir el prompt de valoracion.
+
+    Se deriva de la familia de las lineas (contexto_linea.tipo_familia):
+    si hay alguna de residuos -> 'residuos'; si hay de hormigon ->
+    'hormigon'; en otro caso 'generico'. Mismo criterio que el resolver
+    de sv2, pero sobre las lineas ya persistidas.
+    """
+    fams = set()
+    for l in getattr(context, "lineas_albaran", None) or []:
+        ctx = getattr(l, "contexto_linea", None)
+        fam = getattr(ctx, "tipo_familia", None) if ctx is not None else None
+        if fam:
+            fams.add(str(fam).strip().lower())
+    if "residuos" in fams:
+        return "residuos"
+    if "hormigon" in fams:
+        return "hormigon"
+    return "generico"

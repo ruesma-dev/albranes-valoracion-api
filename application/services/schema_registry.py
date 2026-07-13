@@ -5,6 +5,7 @@ from typing import Dict, Type
 
 from pydantic import BaseModel
 
+from domain.models.conciliacion_models import DocumentoConciliacion
 from domain.models.valuation_models import DocumentoValoracion
 
 
@@ -12,6 +13,7 @@ class SchemaRegistry:
     def __init__(self) -> None:
         self._schemas: Dict[str, Type[BaseModel]] = {
             "documento_valoracion": DocumentoValoracion,
+            "documento_conciliacion": DocumentoConciliacion,
         }
 
     def get(self, schema_name: str) -> Type[BaseModel]:

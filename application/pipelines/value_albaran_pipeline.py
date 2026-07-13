@@ -96,8 +96,10 @@ class ValueAlbaranPipeline:
         extraction_service: ValuationExtractionService,
         max_pdf_mb: int,
         service_version: str,
+        ia3_provider: str | None = None,
     ) -> None:
         self._context_repo = context_repository
+        self._ia3_provider = ia3_provider
         self._pdf_downloader = pdf_downloader
         self._prefilter = prefilter
         self._service = extraction_service
@@ -295,7 +297,12 @@ class ValueAlbaranPipeline:
         # Convención: si Claude está habilitado, su salida es la
         # principal (campo "data"). Si no, cae a Gemini, y si no a
         # OpenAI. El resto se anexa como proveedores secundarios.
-        primary_order = ("claude", "gemini", "openai")
+        # El primario es el de IA3_PROVIDER si se configuro; si no, el
+        # orden historico claude > gemini > openai.
+        _sel = (self._ia3_provider or "").strip().lower()
+        primary_order = (
+            (_sel,) if _sel else ("claude", "gemini", "openai")
+        )
         primary_result: ProviderValuationResult | None = None
         primary_name: str | None = None
         for provider_name in primary_order:
